@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { createSupabaseBrowserClient } from '@/lib/supabase';
 import { SearchForm } from '@/components/SearchForm';
 import { ResultsTable } from '@/components/ResultsTable';
+import { NeedsReviewBoard } from '@/components/NeedsReviewBoard';
 import { DiagnosticsPanel } from '@/components/DiagnosticsPanel';
 import { ScpCacheUploader } from '@/components/ScpCacheUploader';
 import { ScpCacheLibrary } from '@/components/ScpCacheLibrary';
@@ -297,8 +298,7 @@ export default function DealsPage() {
         </div>
 
         <ResultsTable title="Deals" rows={dashboard.visibleResults} onDisposition={setDisposition} />
-        <ResultsTable
-          title="Needs Review"
+        <NeedsReviewBoard
           rows={dashboard.needsReviewResults}
           reviewOptionsByResultId={dashboard.reviewOptionsByResultId}
           onDisposition={setDisposition}

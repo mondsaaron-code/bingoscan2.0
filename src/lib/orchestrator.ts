@@ -31,7 +31,7 @@ import type { SearchForm, ScanSummary } from '@/types/app';
 const TARGET_RESULTS = 10;
 const FETCH_PAGE_SIZE = 40;
 const MAX_CANDIDATES_PER_TICK = 3;
-const AUTO_ACCEPT_CONFIDENCE = 90;
+const BASE_AUTO_ACCEPT_CONFIDENCE = 90;
 
 export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   const scan = await getScanById(scanId);
@@ -248,9 +248,15 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
   await incrementUsage('openai', 1);
   await appendMetrics(scanId, { openaiCalls: 1 });
 
+  const threshold = computeAcceptanceThreshold(listing, details, filters, rankedCandidates);
+  if (threshold.value > BASE_AUTO_ACCEPT_CONFIDENCE) {
+    await addScanEvent(scanId, 'info', 'ai_verifying', `Raised auto-accept threshold to ${threshold.value}%`, `${listing.title}
+${threshold.reasons.join(' • ')}`);
+  }
+
   const chosen = rankedCandidates.find((candidate) => candidate.productId === decision.chosenProductId) ?? rankedCandidates[0] ?? null;
 
-  if (!decision.exactMatch || decision.confidence < AUTO_ACCEPT_CONFIDENCE || !chosen) {
+  if (!decision.exactMatch || decision.confidence < threshold.value || !chosen) {
     const resultId = await insertResultPayload(scanId, listing, null, decision, true);
     await insertReviewOptions(
       resultId,
@@ -258,7 +264,8 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
     );
     await appendMetrics(scanId, { needsReview: 1 });
     await updateCandidate(candidateId, { stage: 'needs_review', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning });
-    await addScanEvent(scanId, 'warning', 'ai_verifying', 'Sent listing to Needs Review', `${listing.title}\n${decision.reasoning}`);
+    const thresholdNote = decision.confidence < threshold.value ? `\nThreshold ${threshold.value}% required.` : '';
+    await addScanEvent(scanId, 'warning', 'ai_verifying', 'Sent listing to Needs Review', `${listing.title}\n${decision.reasoning}${thresholdNote}`);
     return;
   }
 
@@ -503,4 +510,67 @@ function passesThresholds(filters: SearchForm, estimatedProfit: number, estimate
   if (filters.minProfit && estimatedProfit < filters.minProfit) return false;
   if (filters.minMarginPct && (estimatedMarginPct ?? 0) < filters.minMarginPct) return false;
   return true;
+}
+
+
+function computeAcceptanceThreshold(
+  listing: EbayListing,
+  details: EbayListingDetails | null,
+  filters: SearchForm,
+  rankedCandidates: ScpCandidate[],
+): { value: number; reasons: string[] } {
+  let threshold = BASE_AUTO_ACCEPT_CONFIDENCE;
+  const reasons: string[] = [];
+  const fingerprint = normalizeTitleFingerprint(`${listing.title} ${details?.subtitle ?? ''}`);
+  const combined = compactWhitespace(
+    [
+      listing.title,
+      details?.subtitle ?? '',
+      details ? buildAspectHints(details.aspectMap).join(' ') : '',
+      rankedCandidates.slice(0, 3).map((candidate) => candidate.productName).join(' '),
+    ].join(' '),
+  ).toLowerCase();
+
+  const parallelHeavy = /(prizm|mosaic|optic|select|chrome|refractor|silver|holo|pulsar|shimmer|mojo|scope|disco|wave|ice|sparkle|velocity|genesis|downtown|kaboom)/i.test(combined);
+  if (parallelHeavy) {
+    threshold += 3;
+    reasons.push('parallel-heavy set or variant cues');
+  }
+
+  const specialtyHit =
+    filters.autographed ||
+    filters.memorabilia ||
+    filters.numberedCard ||
+    /auto(graph)?|patch|relic|memorabilia|jersey|\/\d{2,4}\b|numbered/i.test(combined);
+  if (specialtyHit) {
+    threshold += 2;
+    reasons.push('specialty card signals');
+  }
+
+  const hasCardNumber =
+    Boolean(filters.cardNumber) ||
+    /#\s?[a-z0-9-]+\b/i.test(combined) ||
+    Boolean(details?.aspectMap['card number']?.[0]);
+  if (!hasCardNumber) {
+    threshold += 2;
+    reasons.push('missing firm card-number evidence');
+  }
+
+  const aspectCount = details ? Object.keys(details.aspectMap).length : 0;
+  if (aspectCount < 3) {
+    threshold += 1;
+    reasons.push('thin eBay item specifics');
+  }
+
+  const topGap =
+    rankedCandidates.length >= 2
+      ? scoreCandidate(fingerprint, listing, details, rankedCandidates[0]) - scoreCandidate(fingerprint, listing, details, rankedCandidates[1])
+      : 999;
+  if (topGap >= 0 && topGap < 6) {
+    threshold += 2;
+    reasons.push('top SCP candidates are tightly clustered');
+  }
+
+  threshold = Math.max(BASE_AUTO_ACCEPT_CONFIDENCE, Math.min(97, threshold));
+  return { value: threshold, reasons };
 }

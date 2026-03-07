@@ -56,3 +56,15 @@ img.table-image { width: 64px; height: 88px; object-fit: cover; border-radius: 1
 @media (max-width: 1080px) {
   .grid-4, .grid-3, .grid-2 { grid-template-columns: 1fr; }
 }
+.review-card { display: flex; flex-direction: column; gap: 16px; }
+.review-source { padding: 16px; }
+.review-source-top { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 16px; align-items: start; }
+.review-image { width: 160px; height: 220px; object-fit: cover; border-radius: 14px; border: 1px solid var(--border); background: #0b1324; }
+.review-placeholder { display: flex; align-items: center; justify-content: center; color: var(--muted); }
+.review-options-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.review-option-card { min-height: 100%; }
+@media (max-width: 1080px) {
+  .review-source-top { grid-template-columns: 1fr; }
+  .review-image { width: 100%; height: auto; max-height: 320px; }
+  .review-options-grid { grid-template-columns: 1fr; }
+}
