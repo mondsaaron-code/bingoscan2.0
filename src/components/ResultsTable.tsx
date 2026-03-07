@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import type { Disposition, ReviewOption, ScanResultRow } from '@/types/app';
-import { formatRelativeTime, toCurrency, toPct } from '@/lib/utils';
+import { formatRelativeTime, scoreDealOpportunity, toCurrency, toPct } from '@/lib/utils';
 
 export function ResultsTable({
   title,
@@ -18,32 +18,34 @@ export function ResultsTable({
   onResolveReview?: (resultId: string, optionId: string) => Promise<void>;
 }) {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  const [sortKey, setSortKey] = useState<'createdAt' | 'estimatedMarginPct' | 'totalPurchasePrice'>('createdAt');
+  const [sortKey, setSortKey] = useState<'createdAt' | 'estimatedMarginPct' | 'totalPurchasePrice' | 'estimatedProfit' | 'dealScore'>('createdAt');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
 
+  const scoredRows = useMemo(() => rows.map((row) => ({ row, dealScore: scoreDealOpportunity({ estimatedProfit: row.estimatedProfit, estimatedMarginPct: row.estimatedMarginPct, aiConfidence: row.aiConfidence, scpUngradedSell: row.scpUngradedSell, scpGrade9: row.scpGrade9, scpPsa10: row.scpPsa10, totalPurchasePrice: row.totalPurchasePrice, needsReview: row.needsReview, auctionEndsAt: row.auctionEndsAt }) })), [rows]);
+
   const sortedRows = useMemo(() => {
-    const copy = [...rows];
+    const copy = [...scoredRows];
     copy.sort((a, b) => {
-      const left = valueForSort(a, sortKey);
-      const right = valueForSort(b, sortKey);
+      const left = valueForSort(a.row, a.dealScore, sortKey);
+      const right = valueForSort(b.row, b.dealScore, sortKey);
       if (left !== right) {
         return sortDir === 'asc' ? (left > right ? 1 : -1) : left < right ? 1 : -1;
       }
 
       if (sortKey !== 'createdAt') {
-        const createdA = new Date(a.createdAt).getTime();
-        const createdB = new Date(b.createdAt).getTime();
+        const createdA = new Date(a.row.createdAt).getTime();
+        const createdB = new Date(b.row.createdAt).getTime();
         if (createdA !== createdB) return createdB - createdA;
       }
 
-      const marginA = a.estimatedMarginPct ?? -9999;
-      const marginB = b.estimatedMarginPct ?? -9999;
+      const marginA = a.row.estimatedMarginPct ?? -9999;
+      const marginB = b.row.estimatedMarginPct ?? -9999;
       if (marginA !== marginB) return marginB - marginA;
 
-      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      return new Date(b.row.createdAt).getTime() - new Date(a.row.createdAt).getTime();
     });
     return copy;
-  }, [rows, sortKey, sortDir]);
+  }, [scoredRows, sortKey, sortDir]);
 
   function toggleSelection(id: string) {
     setSelectedIds((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
@@ -73,7 +75,9 @@ export function ResultsTable({
               <th></th>
               <th>Image</th>
               <th>eBay Title</th>
+              <th><button className="btn btn-ghost small" onClick={() => flipSort('dealScore', sortKey, sortDir, setSortKey, setSortDir)}>Deal Score</button></th>
               <th><button className="btn btn-ghost small" onClick={() => flipSort('totalPurchasePrice', sortKey, sortDir, setSortKey, setSortDir)}>Purchase Total</button></th>
+              <th><button className="btn btn-ghost small" onClick={() => flipSort('estimatedProfit', sortKey, sortDir, setSortKey, setSortDir)}>Profit</button></th>
               <th>SCP Ungraded</th>
               <th>Grade 9</th>
               <th>PSA 10</th>
@@ -85,7 +89,7 @@ export function ResultsTable({
             </tr>
           </thead>
           <tbody>
-            {sortedRows.map((row) => {
+            {sortedRows.map(({ row, dealScore }) => {
               const reviewOptions = reviewOptionsByResultId?.[row.id] ?? [];
               return (
                 <tr key={row.id}>
@@ -96,6 +100,7 @@ export function ResultsTable({
                   <td>
                     <div><a href={row.ebayUrl} target="_blank" rel="noreferrer">{row.ebayTitle}</a></div>
                     <div className="small muted">Confidence: {row.aiConfidence ? `${row.aiConfidence}%` : '—'}</div>
+                    <div className="small muted">Profit {toCurrency(row.estimatedProfit)} · Grade 9 upside {toCurrency((row.scpGrade9 ?? null) !== null && row.scpGrade9 !== null ? row.scpGrade9 - row.totalPurchasePrice : null)} · PSA 10 upside {toCurrency((row.scpPsa10 ?? null) !== null && row.scpPsa10 !== null ? row.scpPsa10 - row.totalPurchasePrice : null)}</div>
                     {row.reasoning ? <div className="small muted">{row.reasoning}</div> : null}
                     {row.needsReview && reviewOptions.length > 0 && onResolveReview ? (
                       <div className="stack" style={{ marginTop: 10 }}>
@@ -114,7 +119,9 @@ export function ResultsTable({
                       </div>
                     ) : null}
                   </td>
+                  <td><span className="badge">{dealScore}</span></td>
                   <td>{toCurrency(row.totalPurchasePrice)}</td>
+                  <td>{toCurrency(row.estimatedProfit)}</td>
                   <td>{toCurrency(row.scpUngradedSell)}</td>
                   <td>{toCurrency(row.scpGrade9)}</td>
                   <td>{toCurrency(row.scpPsa10)}</td>
@@ -141,7 +148,7 @@ export function ResultsTable({
             })}
             {sortedRows.length === 0 ? (
               <tr>
-                <td colSpan={12} className="muted">No rows yet.</td>
+                <td colSpan={14} className="muted">No rows yet.</td>
               </tr>
             ) : null}
           </tbody>
@@ -151,23 +158,25 @@ export function ResultsTable({
   );
 }
 
-function valueForSort(row: ScanResultRow, key: 'createdAt' | 'estimatedMarginPct' | 'totalPurchasePrice'): number {
+function valueForSort(row: ScanResultRow, dealScore: number, key: 'createdAt' | 'estimatedMarginPct' | 'totalPurchasePrice' | 'estimatedProfit' | 'dealScore'): number {
   if (key === 'createdAt') return new Date(row.createdAt).getTime();
   if (key === 'estimatedMarginPct') return row.estimatedMarginPct ?? -9999;
+  if (key === 'estimatedProfit') return row.estimatedProfit ?? -9999;
+  if (key === 'dealScore') return dealScore;
   return row.totalPurchasePrice;
 }
 
 function flipSort(
-  nextKey: 'createdAt' | 'estimatedMarginPct' | 'totalPurchasePrice',
-  currentKey: 'createdAt' | 'estimatedMarginPct' | 'totalPurchasePrice',
+  nextKey: 'createdAt' | 'estimatedMarginPct' | 'totalPurchasePrice' | 'estimatedProfit' | 'dealScore',
+  currentKey: 'createdAt' | 'estimatedMarginPct' | 'totalPurchasePrice' | 'estimatedProfit' | 'dealScore',
   currentDir: 'asc' | 'desc',
-  setKey: (value: 'createdAt' | 'estimatedMarginPct' | 'totalPurchasePrice') => void,
+  setKey: (value: 'createdAt' | 'estimatedMarginPct' | 'totalPurchasePrice' | 'estimatedProfit' | 'dealScore') => void,
   setDir: (value: 'asc' | 'desc') => void,
 ) {
   if (currentKey === nextKey) {
     setDir(currentDir === 'asc' ? 'desc' : 'asc');
   } else {
     setKey(nextKey);
-    setDir(nextKey === 'createdAt' ? 'desc' : 'asc');
+    setDir(nextKey === 'totalPurchasePrice' ? 'asc' : 'desc');
   }
 }

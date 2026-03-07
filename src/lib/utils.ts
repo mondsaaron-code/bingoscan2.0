@@ -114,3 +114,143 @@ export function toTitleLabel(value: string): string {
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ');
 }
+
+export function scoreListingPriority(args: {
+  title: string;
+  subtitle?: string | null;
+  price: number;
+  shipping?: number | null;
+  imageUrl?: string | null;
+  auctionEndsAt?: string | null;
+  condition?: string | null;
+  filters: {
+    sport?: string;
+    playerName?: string;
+    brand?: string;
+    variant?: string;
+    insert?: string;
+    cardNumber?: string;
+    team?: string;
+    rookie?: boolean;
+    autographed?: boolean;
+    memorabilia?: boolean;
+    numberedCard?: boolean;
+    conditionMode?: 'raw' | 'graded' | 'any';
+    listingMode?: 'buy_now' | 'auction';
+    maxPurchasePrice?: number | null;
+  };
+}): number {
+  const text = compactWhitespace(`${args.title} ${args.subtitle ?? ''}`.toLowerCase());
+  let score = 18;
+
+  const weightedTerms: Array<[string | null | undefined, number]> = [
+    [args.filters.sport, 8],
+    [args.filters.playerName, 16],
+    [args.filters.brand, 10],
+    [args.filters.variant, 8],
+    [args.filters.insert, 8],
+    [args.filters.team, 6],
+  ];
+
+  for (const [term, weight] of weightedTerms) {
+    const normalized = compactWhitespace((term ?? '').toLowerCase());
+    if (normalized && text.includes(normalized)) score += weight;
+  }
+
+  if (args.filters.cardNumber) {
+    const normalizedCard = args.filters.cardNumber.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    if (normalizedCard && new RegExp(`#?${escapeForRegex(normalizedCard)}\\b`, 'i').test(text.replace(/[^a-z0-9#]+/g, ' '))) {
+      score += 14;
+    }
+  }
+
+  if (args.filters.rookie && /\brookie\b|\brc\b/i.test(text)) score += 7;
+  if (args.filters.autographed && /\bauto(graph)?\b|signed/i.test(text)) score += 9;
+  if (args.filters.memorabilia && /memorabilia|patch|relic|jersey/i.test(text)) score += 9;
+  if (args.filters.numberedCard && /\/\d{2,4}\b|numbered/i.test(text)) score += 7;
+
+  if (args.imageUrl) score += 5;
+
+  const total = args.price + (args.shipping ?? 0);
+  if (args.filters.maxPurchasePrice && args.filters.maxPurchasePrice > 0) {
+    const ratio = total / args.filters.maxPurchasePrice;
+    if (ratio <= 0.45) score += 10;
+    else if (ratio <= 0.7) score += 7;
+    else if (ratio <= 0.9) score += 4;
+    else if (ratio > 1.05) score -= 8;
+  } else if (total <= 30) {
+    score += 4;
+  }
+
+  if (args.filters.listingMode === 'auction' && args.auctionEndsAt) {
+    const diffHours = (new Date(args.auctionEndsAt).getTime() - Date.now()) / 3_600_000;
+    if (Number.isFinite(diffHours) && diffHours > 0) {
+      if (diffHours <= 1) score += 8;
+      else if (diffHours <= 2) score += 6;
+      else if (diffHours <= 4) score += 3;
+    }
+  }
+
+  const normalizedCondition = (args.condition ?? '').toLowerCase();
+  if (args.filters.conditionMode === 'raw' && /psa|bgs|sgc|cgc|graded|slab/i.test(normalizedCondition)) score -= 18;
+  if (args.filters.conditionMode === 'graded' && normalizedCondition && !/psa|bgs|sgc|cgc|graded|slab/i.test(normalizedCondition)) score -= 10;
+
+  if (/lot|bundle|team set|mystery|hot pack|break/i.test(text)) score -= 20;
+  if (text.split(/\s+/).length < 4) score -= 5;
+
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+export function scoreDealOpportunity(args: {
+  estimatedProfit?: number | null;
+  estimatedMarginPct?: number | null;
+  aiConfidence?: number | null;
+  scpUngradedSell?: number | null;
+  scpGrade9?: number | null;
+  scpPsa10?: number | null;
+  totalPurchasePrice: number;
+  needsReview?: boolean;
+  auctionEndsAt?: string | null;
+}): number {
+  let score = 0;
+  const profit = args.estimatedProfit ?? null;
+  const margin = args.estimatedMarginPct ?? null;
+  const confidence = args.aiConfidence ?? null;
+  const grade9Upside = args.scpGrade9 !== null && args.scpGrade9 !== undefined ? args.scpGrade9 - args.totalPurchasePrice : null;
+  const psa10Upside = args.scpPsa10 !== null && args.scpPsa10 !== undefined ? args.scpPsa10 - args.totalPurchasePrice : null;
+
+  if (profit !== null) {
+    if (profit >= 150) score += 28;
+    else if (profit >= 75) score += 20;
+    else if (profit >= 35) score += 14;
+    else if (profit >= 15) score += 8;
+    else score += Math.max(-10, profit / 4);
+  }
+
+  if (margin !== null) {
+    if (margin >= 120) score += 28;
+    else if (margin >= 80) score += 20;
+    else if (margin >= 50) score += 14;
+    else if (margin >= 25) score += 8;
+    else score += Math.max(-8, margin / 5);
+  }
+
+  if (confidence !== null) score += Math.max(0, Math.min(20, (confidence - 70) * 0.65));
+  if (grade9Upside !== null && grade9Upside > 20) score += Math.min(10, grade9Upside / 20);
+  if (psa10Upside !== null && psa10Upside > 40) score += Math.min(16, psa10Upside / 25);
+  if (args.needsReview) score -= 10;
+
+  if (args.auctionEndsAt) {
+    const diffHours = (new Date(args.auctionEndsAt).getTime() - Date.now()) / 3_600_000;
+    if (Number.isFinite(diffHours) && diffHours > 0) {
+      if (diffHours <= 1) score += 4;
+      else if (diffHours <= 3) score += 2;
+    }
+  }
+
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function escapeForRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}

@@ -25,7 +25,7 @@ import {
   type ScpCandidate,
 } from '@/lib/scp';
 import { identifyWithXimilar } from '@/lib/ximilar';
-import { compactWhitespace, normalizeTitleFingerprint, tokenizeLoose } from '@/lib/utils';
+import { compactWhitespace, normalizeTitleFingerprint, scoreListingPriority, tokenizeLoose } from '@/lib/utils';
 import type { SearchForm, ScanSummary } from '@/types/app';
 
 const TARGET_RESULTS = 10;
@@ -72,8 +72,15 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
     return (await getScanById(scanId))!;
   }
 
+  const prioritizedListings = [...listings].sort((a, b) => scoreListingForQueue(b, scan.filters) - scoreListingForQueue(a, scan.filters));
+  const topPriorities = prioritizedListings.slice(0, Math.min(MAX_CANDIDATES_PER_TICK, prioritizedListings.length)).map((listing) => {
+    const score = scoreListingForQueue(listing, scan.filters);
+    return `${score} · ${compactWhitespace(listing.title).slice(0, 88)}`;
+  });
+  await addScanEvent(scanId, 'info', 'filtering', 'Prioritized eBay candidates for this tick', topPriorities.join('\n'));
+
   let processed = 0;
-  for (const listing of listings) {
+  for (const listing of prioritizedListings) {
     if (processed >= MAX_CANDIDATES_PER_TICK) break;
     const dedupeAllowed = await upsertDedupeItem(listing.itemId);
     if (!dedupeAllowed) {
@@ -336,6 +343,19 @@ function shouldUseXimilar(listing: EbayListing, details: EbayListingDetails | nu
   if (imageCount === 0) return false;
   const lower = `${listing.title} ${details?.subtitle ?? ''}`.toLowerCase();
   return !/#[a-z0-9]+/.test(lower) || lower.includes('prizm') || lower.includes('mosaic') || lower.includes('optic') || lower.includes('refractor');
+}
+
+
+function scoreListingForQueue(listing: EbayListing, filters: SearchForm): number {
+  return scoreListingPriority({
+    title: listing.title,
+    price: listing.price,
+    shipping: listing.shipping,
+    imageUrl: listing.imageUrl,
+    auctionEndsAt: listing.auctionEndsAt,
+    condition: listing.condition,
+    filters,
+  });
 }
 
 function buildScpQuery(listing: EbayListing, details: EbayListingDetails | null, hints: string[]): string {
