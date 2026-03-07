@@ -5,12 +5,12 @@ import { useRouter } from 'next/navigation';
 import { createSupabaseBrowserClient } from '@/lib/supabase';
 import { SearchForm } from '@/components/SearchForm';
 import { ResultsTable } from '@/components/ResultsTable';
-import { NeedsReviewBoard } from '@/components/NeedsReviewBoard';
 import { DiagnosticsPanel } from '@/components/DiagnosticsPanel';
 import { ScpCacheUploader } from '@/components/ScpCacheUploader';
 import { ScpCacheLibrary } from '@/components/ScpCacheLibrary';
+import { NeedsReviewBoard } from '@/components/NeedsReviewBoard';
 import type { DashboardSnapshot, Disposition, SearchForm as SearchFormType } from '@/types/app';
-import { formatDurationSeconds, scoreDealOpportunity, toCurrency, toTitleLabel } from '@/lib/utils';
+import { toCurrency, toTitleLabel } from '@/lib/utils';
 
 const EMPTY_DASHBOARD: DashboardSnapshot = {
   activeScan: null,
@@ -137,23 +137,6 @@ export default function DealsPage() {
   const scanContext = dashboard.activeScan ?? dashboard.latestScan;
 
   const kpis = useMemo(() => {
-    const topDealScore = dashboard.visibleResults.length
-      ? Math.max(
-          ...dashboard.visibleResults.map((row) =>
-            scoreDealOpportunity({
-              estimatedProfit: row.estimatedProfit,
-              estimatedMarginPct: row.estimatedMarginPct,
-              aiConfidence: row.aiConfidence,
-              scpUngradedSell: row.scpUngradedSell,
-              scpGrade9: row.scpGrade9,
-              scpPsa10: row.scpPsa10,
-              totalPurchasePrice: row.totalPurchasePrice,
-              needsReview: row.needsReview,
-              auctionEndsAt: row.auctionEndsAt,
-            }),
-          ),
-        )
-      : '—';
     return [
       { label: 'OpenAI Cost Today', value: toCurrency(dashboard.usage.openAiCostTodayUsd) },
       { label: 'eBay Calls Today', value: dashboard.usage.ebayCallsToday },
@@ -162,25 +145,20 @@ export default function DealsPage() {
       { label: 'Ximilar Calls Today', value: dashboard.usage.ximilarCallsToday },
       { label: 'Deals Found', value: scanContext?.metrics.dealsFound ?? 0 },
       { label: 'Needs Review', value: scanContext?.metrics.needsReview ?? 0 },
-      { label: 'Top Deal Score', value: topDealScore },
+      { label: 'Candidates Evaluated', value: scanContext?.metrics.candidatesEvaluated ?? 0 },
     ];
   }, [dashboard, scanContext]);
+
 
   const progress = useMemo(() => {
     const currentResults = (scanContext?.metrics.dealsFound ?? 0) + (scanContext?.metrics.needsReview ?? 0);
     const targetResults = 10;
     const processedCandidates = (scanContext?.metrics.candidatesEvaluated ?? 0) + (scanContext?.metrics.candidatesFilteredOut ?? 0);
-    const startedAt = scanContext ? new Date(scanContext.startedAt).getTime() : null;
-    const elapsedSeconds = startedAt ? Math.max(0, (Date.now() - startedAt) / 1000) : null;
-    const perCandidateSeconds = elapsedSeconds && processedCandidates > 0 ? elapsedSeconds / processedCandidates : null;
-    const remainingResults = Math.max(0, targetResults - currentResults);
-    const estimatedSecondsRemaining = perCandidateSeconds ? remainingResults * Math.max(1.5, processedCandidates / Math.max(1, currentResults || 1)) * perCandidateSeconds : null;
     return {
       currentResults,
       targetResults,
       processedCandidates,
       pct: Math.min(100, Math.round((currentResults / targetResults) * 100)),
-      estimatedSecondsRemaining,
     };
   }, [scanContext]);
 
@@ -256,7 +234,6 @@ export default function DealsPage() {
                 <div className="section-title">Scan Progress</div>
                 <div className="muted small">
                   {dashboard.activeScan ? 'Live scan in progress.' : 'Showing the latest completed scan.'}
-                  {dashboard.activeScan && progress.estimatedSecondsRemaining ? ` Rough ETA ${formatDurationSeconds(progress.estimatedSecondsRemaining)}.` : ''}
                 </div>
               </div>
               <div className="badge">{toTitleLabel(scanContext.status)}</div>

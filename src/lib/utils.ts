@@ -254,3 +254,61 @@ export function scoreDealOpportunity(args: {
 function escapeForRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
+
+
+export function summarizeDealReasons(args: {
+  estimatedProfit?: number | null;
+  estimatedMarginPct?: number | null;
+  aiConfidence?: number | null;
+  scpUngradedSell?: number | null;
+  scpGrade9?: number | null;
+  scpPsa10?: number | null;
+  totalPurchasePrice: number;
+  auctionEndsAt?: string | null;
+  needsReview?: boolean;
+}): string {
+  const parts: string[] = [];
+  const profit = args.estimatedProfit ?? null;
+  const margin = args.estimatedMarginPct ?? null;
+  const confidence = args.aiConfidence ?? null;
+  const grade9Upside = args.scpGrade9 !== null && args.scpGrade9 !== undefined ? args.scpGrade9 - args.totalPurchasePrice : null;
+  const psa10Upside = args.scpPsa10 !== null && args.scpPsa10 !== undefined ? args.scpPsa10 - args.totalPurchasePrice : null;
+
+  if (profit !== null) {
+    parts.push(`${profit >= 0 ? 'Spread' : 'Gap'} ${toCurrency(profit)}`);
+  }
+  if (margin !== null) {
+    parts.push(`Margin ${toPct(margin)}`);
+  }
+  if (confidence !== null) {
+    parts.push(`AI ${Math.round(confidence)}%`);
+  }
+  if (grade9Upside !== null && grade9Upside > 0) {
+    parts.push(`PSA 9 upside ${toCurrency(grade9Upside)}`);
+  }
+  if (psa10Upside !== null && psa10Upside > 0) {
+    parts.push(`PSA 10 upside ${toCurrency(psa10Upside)}`);
+  }
+  if (args.auctionEndsAt) {
+    const relative = formatRelativeTime(args.auctionEndsAt);
+    if (relative !== '—') {
+      parts.push(`Auction ${relative}`);
+    }
+  }
+  if (args.needsReview) {
+    parts.push('Manual review needed');
+  }
+  return parts.join(' • ');
+}
+
+export function tokenSimilarity(left: string, right: string): number {
+  const leftSet = new Set(tokenizeLoose(left).filter((token) => token.length > 2));
+  const rightSet = new Set(tokenizeLoose(right).filter((token) => token.length > 2));
+  if (leftSet.size === 0 || rightSet.size === 0) return 0;
+  let intersection = 0;
+  for (const token of leftSet) {
+    if (rightSet.has(token)) intersection += 1;
+  }
+  const union = new Set([...leftSet, ...rightSet]).size;
+  return union ? intersection / union : 0;
+}

@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import type { Disposition, ReviewOption, ScanResultRow } from '@/types/app';
-import { formatRelativeTime, scoreDealOpportunity, toCurrency, toPct } from '@/lib/utils';
+import { formatRelativeTime, scoreDealOpportunity, summarizeDealReasons, toCurrency, toPct } from '@/lib/utils';
 
 export function ResultsTable({
   title,
@@ -100,8 +100,20 @@ export function ResultsTable({
                   <td>
                     <div><a href={row.ebayUrl} target="_blank" rel="noreferrer">{row.ebayTitle}</a></div>
                     <div className="small muted">Confidence: {row.aiConfidence ? `${row.aiConfidence}%` : '—'}</div>
-                    <div className="small muted">Profit {toCurrency(row.estimatedProfit)} · Grade 9 upside {toCurrency((row.scpGrade9 ?? null) !== null && row.scpGrade9 !== null ? row.scpGrade9 - row.totalPurchasePrice : null)} · PSA 10 upside {toCurrency((row.scpPsa10 ?? null) !== null && row.scpPsa10 !== null ? row.scpPsa10 - row.totalPurchasePrice : null)}</div>
-                    {row.reasoning ? <div className="small muted">{row.reasoning}</div> : null}
+                    <div className="small" style={{ color: '#d8e1f0', marginTop: 4 }}>
+                      Why it stands out: {summarizeDealReasons({
+                        estimatedProfit: row.estimatedProfit,
+                        estimatedMarginPct: row.estimatedMarginPct,
+                        aiConfidence: row.aiConfidence,
+                        scpUngradedSell: row.scpUngradedSell,
+                        scpGrade9: row.scpGrade9,
+                        scpPsa10: row.scpPsa10,
+                        totalPurchasePrice: row.totalPurchasePrice,
+                        auctionEndsAt: row.auctionEndsAt,
+                        needsReview: row.needsReview,
+                      }) || 'No strong edge yet'}
+                    </div>
+                    {row.reasoning ? <div className="small muted" style={{ marginTop: 4 }}>{row.reasoning}</div> : null}
                     {row.needsReview && reviewOptions.length > 0 && onResolveReview ? (
                       <div className="stack" style={{ marginTop: 10 }}>
                         {reviewOptions.map((option) => (

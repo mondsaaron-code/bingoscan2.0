@@ -1,7 +1,7 @@
 'use client';
 
 import type { Disposition, ReviewOption, ScanResultRow } from '@/types/app';
-import { formatRelativeTime, scoreDealOpportunity, toCurrency, toPct } from '@/lib/utils';
+import { formatRelativeTime, scoreDealOpportunity, summarizeDealReasons, toCurrency, toPct } from '@/lib/utils';
 
 export function NeedsReviewBoard({
   rows,
@@ -74,6 +74,19 @@ export function NeedsReviewBoard({
                           <div className="small muted">Margin</div>
                           <div className="kpi-value" style={{ fontSize: '1.15rem' }}>{toPct(row.estimatedMarginPct)}</div>
                         </div>
+                      </div>
+                      <div className="small" style={{ color: '#d8e1f0' }}>
+                        Review focus: {summarizeDealReasons({
+                          estimatedProfit: row.estimatedProfit,
+                          estimatedMarginPct: row.estimatedMarginPct,
+                          aiConfidence: row.aiConfidence,
+                          scpUngradedSell: row.scpUngradedSell,
+                          scpGrade9: row.scpGrade9,
+                          scpPsa10: row.scpPsa10,
+                          totalPurchasePrice: row.totalPurchasePrice,
+                          auctionEndsAt: row.auctionEndsAt,
+                          needsReview: true,
+                        }) || 'Compare the SCP candidates below.'}
                       </div>
                       <div className="small muted">Current placeholder match: Ungraded {toCurrency(row.scpUngradedSell)} · Grade 9 {toCurrency(row.scpGrade9)} · PSA 10 {toCurrency(row.scpPsa10)}</div>
                       {row.reasoning ? <div className="notice"><div className="small"><strong>AI review note:</strong> {row.reasoning}</div></div> : null}

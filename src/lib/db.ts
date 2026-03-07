@@ -29,6 +29,13 @@ const PROVIDER_LIMIT_ENV: Record<ProviderName, string> = {
   ximilar: 'XIMILAR_DAILY_CALL_LIMIT',
 };
 
+type BadLogicMemoryRow = {
+  ebayTitle: string;
+  fingerprint: string;
+  createdAt: string;
+  reasoning: string | null;
+};
+
 type UsageRow = {
   usage_date: string;
   ebay_calls: number;
@@ -272,6 +279,22 @@ export async function resolveReview(resultId: string, optionId: string): Promise
   if (resultRow?.ebay_title) {
     await saveManualMatchOverride(String(resultRow.ebay_title), String(option.scp_product_id), String(option.scp_product_name));
   }
+}
+
+export async function getRecentBadLogicPatterns(limit = 250): Promise<BadLogicMemoryRow[]> {
+  const { data, error } = await getSupabase()
+    .from('scan_results')
+    .select('ebay_title, reasoning, created_at')
+    .eq('disposition', 'bad_logic')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return ((data ?? []) as Array<Record<string, unknown>>).map((row) => ({
+    ebayTitle: String(row.ebay_title ?? ''),
+    fingerprint: normalizeTitleFingerprint(String(row.ebay_title ?? '')),
+    createdAt: String(row.created_at ?? ''),
+    reasoning: row.reasoning ? String(row.reasoning) : null,
+  }));
 }
 
 export async function getManualMatchOverride(
