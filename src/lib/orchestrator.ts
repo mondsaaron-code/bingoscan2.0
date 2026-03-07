@@ -2,6 +2,7 @@ import { searchEbayListings, type EbayListing } from '@/lib/ebay';
 import {
   addScanEvent,
   appendMetrics,
+  getManualMatchOverride,
   getScanById,
   incrementUsage,
   insertCandidate,
@@ -12,14 +13,21 @@ import {
   upsertDedupeItem,
 } from '@/lib/db';
 import { shouldRejectTitle } from '@/lib/filters';
-import { verifyCardMatchWithOpenAI } from '@/lib/openai';
-import { searchSportsCardsProCandidates, type ScpCandidate } from '@/lib/scp';
-import { identifyWithXimilar } from '@/lib/ximilar';
+import { verifyCardMatchWithOpenAI, type MatchDecision } from '@/lib/openai';
+import {
+  getSportsCardsProProductById,
+  hydrateSportsCardsProCandidates,
+  searchSportsCardsProCandidates,
+  type ScpCandidate,
+} from '@/lib/scp';
+import { identifyWithXimilar, type XimilarCardHints } from '@/lib/ximilar';
 import type { SearchForm, ScanSummary } from '@/types/app';
+import { normalizeLooseText } from '@/lib/utils';
 
 const TARGET_RESULTS = 10;
 const FETCH_PAGE_SIZE = 40;
-const MAX_CANDIDATES_PER_TICK = 8;
+const MAX_CANDIDATES_PER_TICK = 2;
+const SCP_AUTO_MATCH_CONFIDENCE = 90;
 
 export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   const scan = await getScanById(scanId);
@@ -53,6 +61,7 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   let processed = 0;
   for (const listing of listings) {
     if (processed >= MAX_CANDIDATES_PER_TICK) break;
+
     const dedupeAllowed = await upsertDedupeItem(listing.itemId);
     if (!dedupeAllowed) {
       await appendMetrics(scanId, { candidatesFilteredOut: 1 });
@@ -108,36 +117,82 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
   await updateCandidate(candidateId, { stage: 'matching_scp' });
   await appendMetrics(scanId, { candidatesEvaluated: 1 });
 
-  const ximilarHints = shouldUseXimilar(listing.title, listing.imageUrl) ? await identifyWithXimilar([listing.imageUrl!].filter(Boolean)) : null;
-  if (ximilarHints) {
-    await incrementUsage('ximilar', 1);
-    await appendMetrics(scanId, { ximilarCalls: 1 });
-  }
+  const ximilarHints = await getXimilarHints(scanId, listing);
 
-  const scpQuery = buildScpQuery(listing.title, ximilarHints?.titleHints ?? []);
-  const candidates = await searchSportsCardsProCandidates(scpQuery);
+  const scpQuery = buildScpQuery(listing, filters, ximilarHints);
+  const basicCandidates = await searchSportsCardsProCandidates(scpQuery);
   await incrementUsage('scp', 1);
   await appendMetrics(scanId, { scpCalls: 1 });
 
-  if (candidates.length === 0) {
+  if (basicCandidates.length === 0) {
     await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: 'No SportsCardsPro candidates found' });
     await addScanEvent(scanId, 'warning', 'matching_scp', 'No SCP candidates found', listing.title);
     return;
   }
 
+  const rankedBaseCandidates = rankScpCandidatesLocally(listing.title, basicCandidates, ximilarHints).slice(0, 6);
+  const hydration = await hydrateSportsCardsProCandidates(rankedBaseCandidates, 5);
+  if (hydration.apiCalls > 0) {
+    await incrementUsage('scp', hydration.apiCalls);
+    await appendMetrics(scanId, { scpCalls: hydration.apiCalls });
+  }
+
+  let rankedCandidates = rankScpCandidatesLocally(listing.title, hydration.candidates, ximilarHints).slice(0, 5);
+
+  const manualOverride = await getManualMatchOverride(listing.title);
+  if (manualOverride) {
+    let overrideCandidate = rankedCandidates.find((candidate) => candidate.productId === manualOverride.scpProductId) ?? null;
+    let extraCalls = 0;
+    if (!overrideCandidate) {
+      overrideCandidate = await getSportsCardsProProductById(manualOverride.scpProductId);
+      extraCalls = 1;
+    }
+
+    if (extraCalls > 0) {
+      await incrementUsage('scp', extraCalls);
+      await appendMetrics(scanId, { scpCalls: extraCalls });
+    }
+
+    if (overrideCandidate) {
+      rankedCandidates = [overrideCandidate, ...rankedCandidates.filter((candidate) => candidate.productId !== overrideCandidate.productId)].slice(0, 5);
+      const overrideDecision: MatchDecision = {
+        exactMatch: true,
+        confidence: 99,
+        reasoning: `Applied manual override for matching fingerprint: ${manualOverride.scpProductName}`,
+        chosenProductId: overrideCandidate.productId,
+        topThreeProductIds: rankedCandidates.slice(0, 3).map((candidate) => candidate.productId),
+        extractedAttributes: {},
+      };
+      await finalizeDecision(scanId, candidateId, listing, filters, rankedCandidates, overrideDecision, true);
+      return;
+    }
+  }
+
   await markScanStatus(scanId, 'ai_verifying', 'Verifying exact match with OpenAI');
-  const rankedCandidates = rankScpCandidatesLocally(listing.title, candidates).slice(0, 5);
-  const decision = await verifyCardMatchWithOpenAI(listing, rankedCandidates);
+  const decision = await verifyCardMatchWithOpenAI(listing, rankedCandidates, ximilarHints);
   await incrementUsage('openai', 1);
   await appendMetrics(scanId, { openaiCalls: 1 });
 
+  await finalizeDecision(scanId, candidateId, listing, filters, rankedCandidates, decision, false);
+}
+
+async function finalizeDecision(
+  scanId: string,
+  candidateId: string,
+  listing: EbayListing,
+  filters: SearchForm,
+  rankedCandidates: ScpCandidate[],
+  decision: Pick<MatchDecision, 'exactMatch' | 'confidence' | 'reasoning' | 'chosenProductId' | 'topThreeProductIds'>,
+  cameFromOverride: boolean,
+): Promise<void> {
   const chosen = rankedCandidates.find((candidate) => candidate.productId === decision.chosenProductId) ?? rankedCandidates[0] ?? null;
 
-  if (!decision.exactMatch || decision.confidence < 90 || !chosen) {
+  if (!decision.exactMatch || decision.confidence < SCP_AUTO_MATCH_CONFIDENCE || !chosen) {
+    const topThree = selectTopThreeCandidates(rankedCandidates, decision.topThreeProductIds);
     const resultId = await insertResultPayload(scanId, listing, null, decision, true);
     await insertReviewOptions(
       resultId,
-      rankedCandidates.slice(0, 3).map((candidate, index) => reviewOptionPayload(candidate, index + 1, decision.confidence)),
+      topThree.map((candidate, index) => reviewOptionPayload(candidate, index + 1, decision.confidence)),
     );
     await appendMetrics(scanId, { needsReview: 1 });
     await updateCandidate(candidateId, { stage: 'needs_review', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning });
@@ -145,8 +200,14 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
     return;
   }
 
-  const estimatedProfit = (chosen.ungradedSell ?? 0) - listing.total;
-  const estimatedMarginPct = chosen.ungradedSell ? ((estimatedProfit / listing.total) * 100) : null;
+  if (chosen.ungradedSell === null) {
+    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: 'Matched SCP card has no ungraded sell price' });
+    await addScanEvent(scanId, 'warning', 'matching_scp', 'Matched SCP card had no ungraded sell price', chosen.productName);
+    return;
+  }
+
+  const estimatedProfit = chosen.ungradedSell - listing.total;
+  const estimatedMarginPct = listing.total > 0 ? (estimatedProfit / listing.total) * 100 : null;
 
   if (filters.minProfit && estimatedProfit < filters.minProfit) {
     await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: `Profit below threshold: ${estimatedProfit.toFixed(2)}` });
@@ -159,15 +220,43 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
 
   await insertResultPayload(scanId, listing, chosen, decision, false, estimatedProfit, estimatedMarginPct);
   await appendMetrics(scanId, { dealsFound: 1 });
-  await updateCandidate(candidateId, { stage: 'accepted', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning, scp_product_id: chosen.productId });
-  await addScanEvent(scanId, 'info', 'publishing_results', 'Added deal result', `${listing.title}\nConfidence ${decision.confidence}`);
+  await updateCandidate(candidateId, {
+    stage: 'accepted',
+    ai_confidence: decision.confidence,
+    ai_reasoning: decision.reasoning,
+    scp_product_id: chosen.productId,
+  });
+  await addScanEvent(
+    scanId,
+    'info',
+    cameFromOverride ? 'manual_override' : 'publishing_results',
+    'Added deal result',
+    `${listing.title}\nConfidence ${decision.confidence}`,
+  );
+}
+
+async function getXimilarHints(scanId: string, listing: EbayListing): Promise<XimilarCardHints | null> {
+  if (!shouldUseXimilar(listing.title, listing.imageUrl)) return null;
+  try {
+    const hints = await identifyWithXimilar([listing.imageUrl!].filter(Boolean));
+    if (hints) {
+      await incrementUsage('ximilar', 1);
+      await appendMetrics(scanId, { ximilarCalls: 1 });
+      await addScanEvent(scanId, 'info', 'matching_scp', 'Used Ximilar assist', hints.titleHints.slice(0, 5).join(' | '));
+    }
+    return hints;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Ximilar identification failed';
+    await addScanEvent(scanId, 'warning', 'matching_scp', 'Ximilar assist failed; continuing without it', message);
+    return null;
+  }
 }
 
 async function insertResultPayload(
   scanId: string,
   listing: EbayListing,
   candidate: ScpCandidate | null,
-  decision: Awaited<ReturnType<typeof verifyCardMatchWithOpenAI>>,
+  decision: { confidence: number; reasoning: string },
   needsReview: boolean,
   estimatedProfit?: number | null,
   estimatedMarginPct?: number | null,
@@ -215,30 +304,72 @@ function shouldUseXimilar(title: string, imageUrl: string | null): boolean {
   return !/#[a-z0-9]+/.test(lower) || lower.includes('prizm') || lower.includes('mosaic') || lower.includes('optic');
 }
 
-function buildScpQuery(title: string, hints: string[]): string {
-  const tokens = `${title} ${hints.join(' ')}`
-    .replace(/[^a-zA-Z0-9#/\- ]+/g, ' ')
+function buildScpQuery(listing: EbayListing, filters: SearchForm, hints: XimilarCardHints | null): string {
+  const seeds = [
+    listing.title,
+    filters.sport,
+    filters.brand,
+    filters.variant,
+    filters.insert,
+    filters.cardNumber ? `#${filters.cardNumber}` : null,
+    filters.playerName,
+    filters.team,
+    filters.startYear ? String(filters.startYear) : null,
+    filters.endYear && filters.endYear !== filters.startYear ? String(filters.endYear) : null,
+    ...(hints?.titleHints ?? []),
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  const tokens = normalizeLooseText(seeds)
     .split(/\s+/)
     .filter(Boolean)
     .filter((token) => token.length > 1)
-    .slice(0, 14);
+    .slice(0, 16);
   return tokens.join(' ');
 }
 
-function rankScpCandidatesLocally(title: string, candidates: ScpCandidate[]): ScpCandidate[] {
-  const lower = title.toLowerCase();
-  return [...candidates].sort((a, b) => scoreCandidate(lower, b) - scoreCandidate(lower, a));
+function rankScpCandidatesLocally(title: string, candidates: ScpCandidate[], hints: XimilarCardHints | null): ScpCandidate[] {
+  const lower = normalizeLooseText(title);
+  const hintText = normalizeLooseText((hints?.titleHints ?? []).join(' '));
+  return [...candidates].sort((a, b) => scoreCandidate(lower, hintText, b) - scoreCandidate(lower, hintText, a));
 }
 
-function scoreCandidate(title: string, candidate: ScpCandidate): number {
-  const product = candidate.productName.toLowerCase();
+function scoreCandidate(title: string, hintText: string, candidate: ScpCandidate): number {
+  const product = normalizeLooseText(candidate.productName);
+  const consoleName = normalizeLooseText(candidate.consoleName ?? '');
   let score = 0;
+
   for (const token of product.split(/\s+/)) {
-    if (token.length > 2 && title.includes(token)) score += 3;
+    if (token.length > 2 && title.includes(token)) score += 4;
+    if (token.length > 2 && hintText.includes(token)) score += 2;
   }
+
+  for (const token of consoleName.split(/\s+/)) {
+    if (token.length > 3 && title.includes(token)) score += 2;
+  }
+
   const numberMatch = product.match(/#([a-z0-9-]+)/i);
-  if (numberMatch && title.includes(numberMatch[0].toLowerCase())) score += 12;
-  if (/\[[^\]]+\]/.test(product)) score += 2;
-  if (candidate.ungradedSell !== null) score += 1;
+  if (numberMatch && title.includes(numberMatch[0].toLowerCase())) score += 14;
+  if (/\[[^\]]+\]/.test(candidate.productName)) score += 3;
+  if (candidate.ungradedSell !== null) score += 2;
+  if (candidate.grade9 !== null || candidate.psa10 !== null) score += 1;
   return score;
+}
+
+function selectTopThreeCandidates(candidates: ScpCandidate[], preferredIds: string[]): ScpCandidate[] {
+  const ordered: ScpCandidate[] = [];
+  for (const id of preferredIds) {
+    const found = candidates.find((candidate) => candidate.productId === id);
+    if (found && !ordered.some((candidate) => candidate.productId === found.productId)) {
+      ordered.push(found);
+    }
+  }
+  for (const candidate of candidates) {
+    if (!ordered.some((item) => item.productId === candidate.productId)) {
+      ordered.push(candidate);
+    }
+    if (ordered.length >= 3) break;
+  }
+  return ordered.slice(0, 3);
 }

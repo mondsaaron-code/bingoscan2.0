@@ -73,3 +73,18 @@ export function parseMoney(input: string | number | null | undefined): number | 
   const parsed = Number(cleaned);
   return Number.isFinite(parsed) ? parsed : null;
 }
+
+export function normalizeLooseText(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9#\/ ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export function titleFingerprint(value: string): string {
+  return normalizeLooseText(value)
+    .replace(/(?:ebay|sportscardspro|card|cards)/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}

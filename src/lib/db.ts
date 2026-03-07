@@ -1,5 +1,5 @@
 import { createSupabaseAdminClient } from '@/lib/supabase';
-import { safeJsonParse } from '@/lib/utils';
+import { safeJsonParse, titleFingerprint } from '@/lib/utils';
 import { getOpenAiTodayCostUsd } from '@/lib/openai-admin';
 import type {
   DashboardSnapshot,
@@ -166,9 +166,16 @@ export async function setDisposition(resultIds: string[], disposition: Dispositi
 }
 
 export async function resolveReview(resultId: string, optionId: string): Promise<void> {
-  const { data: option, error } = await getSupabase().from('scan_review_options').select('*').eq('id', optionId).single();
-  if (error) throw error;
-  const { error: updateError } = await getSupabase()
+  const supabase = getSupabase();
+  const [{ data: option, error: optionError }, { data: result, error: resultError }] = await Promise.all([
+    supabase.from('scan_review_options').select('*').eq('id', optionId).single(),
+    supabase.from('scan_results').select('ebay_title').eq('id', resultId).single(),
+  ]);
+
+  if (optionError) throw optionError;
+  if (resultError) throw resultError;
+
+  const { error: updateError } = await supabase
     .from('scan_results')
     .update({
       needs_review: false,
@@ -181,6 +188,38 @@ export async function resolveReview(resultId: string, optionId: string): Promise
     })
     .eq('id', resultId);
   if (updateError) throw updateError;
+
+  await saveManualMatchOverride(String(result.ebay_title), String(option.scp_product_id), String(option.scp_product_name));
+}
+
+export async function getManualMatchOverride(ebayTitle: string): Promise<{ scpProductId: string; scpProductName: string } | null> {
+  const fingerprint = titleFingerprint(ebayTitle);
+  const { data, error } = await getSupabase()
+    .from('manual_match_overrides')
+    .select('scp_product_id, scp_product_name')
+    .eq('ebay_title_fingerprint', fingerprint)
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) return null;
+  return {
+    scpProductId: String(data.scp_product_id),
+    scpProductName: String(data.scp_product_name),
+  };
+}
+
+export async function saveManualMatchOverride(ebayTitle: string, scpProductId: string, scpProductName: string): Promise<void> {
+  const supabase = getSupabase();
+  const fingerprint = titleFingerprint(ebayTitle);
+  const { error: deleteError } = await supabase.from('manual_match_overrides').delete().eq('ebay_title_fingerprint', fingerprint);
+  if (deleteError) throw deleteError;
+  const { error } = await supabase.from('manual_match_overrides').insert({
+    ebay_title_fingerprint: fingerprint,
+    scp_product_id: scpProductId,
+    scp_product_name: scpProductName,
+  });
+  if (error) throw error;
 }
 
 export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {

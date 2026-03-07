@@ -29,6 +29,8 @@ Push as a fresh repo.
 
 Import repo.
 Set env vars.
+Make sure the **Framework Preset** is **Next.js**.
+Leave **Output Directory** blank.
 Deploy.
 
 ## First login
