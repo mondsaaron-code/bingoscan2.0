@@ -256,6 +256,57 @@ function escapeForRegex(value: string): string {
 }
 
 
+type DealDiversityKeys = {
+  exactFamily: string;
+  cluster: string;
+};
+
+const DIVERSITY_STOP_WORDS = new Set([
+  'the', 'and', 'with', 'for', 'card', 'cards', 'trading', 'sports',
+  'raw', 'graded', 'slab', 'slabbed', 'mint', 'gem', 'psa', 'bgs', 'sgc', 'cgc', 'authentic',
+  'silver', 'green', 'blue', 'red', 'purple', 'orange', 'gold', 'pink', 'black', 'white', 'bronze', 'sepia', 'negative',
+  'refractor', 'wave', 'mojo', 'disco', 'shimmer', 'sparkle', 'pulsar', 'laser', 'ice', 'cracked', 'reactive', 'fluorescent',
+  'checkerboard', 'snake', 'snakeskin', 'zebra', 'tiger', 'peacock', 'nebula', 'parallel',
+  'listing', 'seller', 'ebay', 'look', 'minty', 'clean', 'nice', 'great', 'rare', 'ssp', 'sp', 'casehit', 'case', 'hit',
+]);
+
+export function buildDealDiversityKeys(args: { ebayTitle: string; scpProductName?: string | null }): DealDiversityKeys {
+  const source = compactWhitespace(`${args.scpProductName ?? ''} ${args.ebayTitle}`);
+  const tokens = tokenizeLoose(source)
+    .map((token) => token.replace(/[\[\]]/g, ''))
+    .filter(Boolean);
+
+  const year = tokens.find((token) => /^(19|20)\d{2}$/.test(token)) ?? '';
+  const filtered = tokens.filter((token) => {
+    if (DIVERSITY_STOP_WORDS.has(token)) return false;
+    if (/^(psa|bgs|sgc|cgc)\d{0,2}$/i.test(token)) return false;
+    if (/^\/?\d{2,4}$/.test(token) && !/^(19|20)\d{2}$/.test(token) && !token.startsWith('#')) return false;
+    if (token.length <= 1) return false;
+    return true;
+  });
+
+  const unique: string[] = [];
+  const seen = new Set<string>();
+  for (const token of filtered) {
+    if (!seen.has(token)) {
+      seen.add(token);
+      unique.push(token);
+    }
+  }
+
+  const cardNumber = unique.find((token) => token.startsWith('#')) ?? '';
+  const core = unique.filter((token) => token !== year && token !== cardNumber);
+  const exact = compactWhitespace([year, ...core.slice(0, 8), cardNumber].filter(Boolean).join(' '));
+  const clusterCore = core.filter((token) => !token.startsWith('#') && !/\d/.test(token));
+  const cluster = compactWhitespace([year, ...clusterCore.slice(0, 5)].filter(Boolean).join(' '));
+  const fallback = normalizeTitleFingerprint(args.scpProductName || args.ebayTitle);
+
+  return {
+    exactFamily: exact || fallback,
+    cluster: cluster || exact || fallback,
+  };
+}
+
 export function summarizeDealReasons(args: {
   estimatedProfit?: number | null;
   estimatedMarginPct?: number | null;

@@ -7,6 +7,7 @@ import {
   getManualMatchOverride,
   getRecentBadLogicPatterns,
   getScanById,
+  getScanResultMemory,
   getScpCacheCsvTextByStoragePath,
   incrementUsage,
   insertCandidate,
@@ -26,7 +27,14 @@ import {
   type ScpCandidate,
 } from '@/lib/scp';
 import { identifyWithXimilar } from '@/lib/ximilar';
-import { compactWhitespace, normalizeTitleFingerprint, tokenSimilarity, tokenizeLoose } from '@/lib/utils';
+import {
+  buildDealDiversityKeys,
+  compactWhitespace,
+  normalizeTitleFingerprint,
+  scoreListingPriority,
+  tokenSimilarity,
+  tokenizeLoose,
+} from '@/lib/utils';
 import type { SearchForm, ScanSummary } from '@/types/app';
 
 const TARGET_RESULTS = 10;
@@ -34,6 +42,8 @@ const FETCH_PAGE_SIZE = 40;
 const MAX_CANDIDATES_PER_TICK = 3;
 const AUTO_ACCEPT_CONFIDENCE = 90;
 const BAD_LOGIC_CACHE_TTL_MS = 2 * 60 * 1000;
+const MAX_EXACT_FAMILY_RESULTS = 1;
+const MAX_CLUSTER_RESULTS = 2;
 
 let badLogicCache: { loadedAt: number; rows: Array<{ ebayTitle: string; fingerprint: string; createdAt: string; reasoning: string | null }> } | null = null;
 
@@ -76,8 +86,21 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
     return (await getScanById(scanId))!;
   }
 
+  const existingResultMemory = await getScanResultMemory(scanId);
+  const prioritizedListings = prioritizeListingsForScan(listings, scan.filters, existingResultMemory);
+  await addScanEvent(
+    scanId,
+    'info',
+    'fetching_ebay',
+    'Prioritized eBay listings for evaluation',
+    prioritizedListings
+      .slice(0, 5)
+      .map((entry) => `${entry.score} · ${entry.listing.title}${entry.reasons.length ? ` [${entry.reasons.join(', ')}]` : ''}`)
+      .join('\n'),
+  );
+
   let processed = 0;
-  for (const listing of listings) {
+  for (const { listing } of prioritizedListings) {
     if (processed >= MAX_CANDIDATES_PER_TICK) break;
     const dedupeAllowed = await upsertDedupeItem(listing.itemId);
     if (!dedupeAllowed) {
@@ -226,6 +249,14 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
       const estimatedProfit = (overrideCandidate.ungradedSell ?? 0) - listing.total;
       const estimatedMarginPct = overrideCandidate.ungradedSell ? (estimatedProfit / listing.total) * 100 : null;
       if (passesThresholds(filters, estimatedProfit, estimatedMarginPct)) {
+        const diversityDecision = await assessScanResultDiversity(scanId, listing, overrideCandidate);
+        if (diversityDecision.rejectReason) {
+          await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: diversityDecision.rejectReason });
+          await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+          await addScanEvent(scanId, 'info', 'publishing_results', diversityDecision.rejectReason, diversityDecision.details ?? listing.title);
+          return;
+        }
+
         await insertResultPayload(
           scanId,
           listing,
@@ -266,6 +297,14 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
   const chosen = rankedCandidates.find((candidate) => candidate.productId === decision.chosenProductId) ?? rankedCandidates[0] ?? null;
 
   if (!decision.exactMatch || decision.confidence < AUTO_ACCEPT_CONFIDENCE || !chosen) {
+    const diversityDecision = await assessScanResultDiversity(scanId, listing, rankedCandidates[0] ?? null);
+    if (diversityDecision.rejectReason) {
+      await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: diversityDecision.rejectReason });
+      await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+      await addScanEvent(scanId, 'info', 'publishing_results', diversityDecision.rejectReason, diversityDecision.details ?? listing.title);
+      return;
+    }
+
     const resultId = await insertResultPayload(scanId, listing, null, decision, true);
     await insertReviewOptions(
       resultId,
@@ -285,6 +324,14 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
       ? `Profit below threshold: ${estimatedProfit.toFixed(2)}`
       : `Margin below threshold: ${(estimatedMarginPct ?? 0).toFixed(2)}%`;
     await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: rejectionReason });
+    return;
+  }
+
+  const diversityDecision = await assessScanResultDiversity(scanId, listing, chosen);
+  if (diversityDecision.rejectReason) {
+    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: diversityDecision.rejectReason });
+    await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+    await addScanEvent(scanId, 'info', 'publishing_results', diversityDecision.rejectReason, diversityDecision.details ?? listing.title);
     return;
   }
 
@@ -499,6 +546,134 @@ function mergeCandidates(...groups: ScpCandidate[][]): ScpCandidate[] {
     }
   }
   return [...byId.values()];
+}
+
+function prioritizeListingsForScan(
+  listings: EbayListing[],
+  filters: SearchForm,
+  existingRows: Array<{ ebayTitle: string; scpProductName: string | null; needsReview: boolean }>,
+): Array<{ listing: EbayListing; score: number; reasons: string[] }> {
+  const existingFamilies = new Set<string>();
+  const existingClusterCounts = new Map<string, number>();
+
+  for (const row of existingRows) {
+    const keys = buildDealDiversityKeys({ ebayTitle: row.ebayTitle, scpProductName: row.scpProductName });
+    if (keys.exactFamily) existingFamilies.add(keys.exactFamily);
+    if (keys.cluster) existingClusterCounts.set(keys.cluster, (existingClusterCounts.get(keys.cluster) ?? 0) + 1);
+  }
+
+  const pageFamilyCounts = new Map<string, number>();
+  const pageClusterCounts = new Map<string, number>();
+  for (const listing of listings) {
+    const keys = buildDealDiversityKeys({ ebayTitle: listing.title });
+    if (keys.exactFamily) pageFamilyCounts.set(keys.exactFamily, (pageFamilyCounts.get(keys.exactFamily) ?? 0) + 1);
+    if (keys.cluster) pageClusterCounts.set(keys.cluster, (pageClusterCounts.get(keys.cluster) ?? 0) + 1);
+  }
+
+  return listings
+    .map((listing) => {
+      const keys = buildDealDiversityKeys({ ebayTitle: listing.title });
+      const baseScore = scoreListingPriority({
+        title: listing.title,
+        price: listing.price,
+        shipping: listing.shipping,
+        imageUrl: listing.imageUrl,
+        auctionEndsAt: listing.auctionEndsAt,
+        condition: listing.condition,
+        filters,
+      });
+
+      let penalty = 0;
+      const reasons: string[] = [];
+      if (keys.exactFamily && existingFamilies.has(keys.exactFamily)) {
+        penalty += 34;
+        reasons.push('family already shown');
+      }
+
+      const clusterCount = keys.cluster ? (existingClusterCounts.get(keys.cluster) ?? 0) : 0;
+      if (clusterCount > 0) {
+        penalty += Math.min(20, clusterCount * 8);
+        reasons.push(`cluster ${clusterCount}`);
+      }
+
+      const pageFamilyCount = keys.exactFamily ? (pageFamilyCounts.get(keys.exactFamily) ?? 0) : 0;
+      if (pageFamilyCount > 1) {
+        penalty += Math.min(14, (pageFamilyCount - 1) * 5);
+        reasons.push(`page family x${pageFamilyCount}`);
+      }
+
+      const pageClusterCount = keys.cluster ? (pageClusterCounts.get(keys.cluster) ?? 0) : 0;
+      if (pageClusterCount > 1) {
+        penalty += Math.min(10, (pageClusterCount - 1) * 3);
+      }
+
+      return {
+        listing,
+        score: Math.max(0, baseScore - penalty),
+        reasons,
+      };
+    })
+    .sort((left, right) => {
+      if (left.score !== right.score) return right.score - left.score;
+      const leftTime = left.listing.auctionEndsAt ? new Date(left.listing.auctionEndsAt).getTime() : 0;
+      const rightTime = right.listing.auctionEndsAt ? new Date(right.listing.auctionEndsAt).getTime() : 0;
+      if (leftTime && rightTime && leftTime !== rightTime) return leftTime - rightTime;
+      return left.listing.total - right.listing.total;
+    });
+}
+
+async function assessScanResultDiversity(
+  scanId: string,
+  listing: EbayListing,
+  candidate: ScpCandidate | null,
+): Promise<{ rejectReason: string | null; details: string | null }> {
+  const existingRows = await getScanResultMemory(scanId);
+  if (existingRows.length === 0) {
+    return { rejectReason: null, details: null };
+  }
+
+  const incomingKeys = buildDealDiversityKeys({ ebayTitle: listing.title, scpProductName: candidate?.productName ?? null });
+  let exactFamilyCount = 0;
+  let clusterCount = 0;
+  let closestTitle: string | null = null;
+  let bestSimilarity = 0;
+
+  for (const row of existingRows) {
+    const existingKeys = buildDealDiversityKeys({ ebayTitle: row.ebayTitle, scpProductName: row.scpProductName });
+    if (existingKeys.exactFamily && existingKeys.exactFamily === incomingKeys.exactFamily) {
+      exactFamilyCount += 1;
+    }
+    if (existingKeys.cluster && existingKeys.cluster === incomingKeys.cluster) {
+      clusterCount += 1;
+    }
+
+    const similarity = Math.max(
+      tokenSimilarity(incomingKeys.exactFamily, existingKeys.exactFamily),
+      tokenSimilarity(listing.title, row.ebayTitle),
+    );
+    if (similarity > bestSimilarity) {
+      bestSimilarity = similarity;
+      closestTitle = row.ebayTitle;
+    }
+  }
+
+  if (exactFamilyCount >= MAX_EXACT_FAMILY_RESULTS) {
+    return {
+      rejectReason: 'Skipped near-duplicate result family already captured this scan',
+      details: closestTitle ? `${incomingKeys.exactFamily}
+Closest existing: ${closestTitle}` : incomingKeys.exactFamily,
+    };
+  }
+
+  if (clusterCount >= MAX_CLUSTER_RESULTS && bestSimilarity >= 0.48) {
+    return {
+      rejectReason: 'Skipped result to preserve scan diversity within the same player/set cluster',
+      details: closestTitle ? `${incomingKeys.cluster}
+Closest existing: ${closestTitle}` : incomingKeys.cluster,
+    };
+  }
+
+  return { rejectReason: null, details: null };
 }
 
 function passesThresholds(filters: SearchForm, estimatedProfit: number, estimatedMarginPct: number | null): boolean {

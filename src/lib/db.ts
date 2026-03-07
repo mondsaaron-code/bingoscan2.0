@@ -281,6 +281,22 @@ export async function resolveReview(resultId: string, optionId: string): Promise
   }
 }
 
+export async function getScanResultMemory(scanId: string): Promise<Array<{ ebayTitle: string; scpProductName: string | null; needsReview: boolean }>> {
+  const { data, error } = await getSupabase()
+    .from('scan_results')
+    .select('ebay_title, scp_product_name, needs_review')
+    .eq('scan_id', scanId)
+    .is('disposition', null)
+    .order('created_at', { ascending: false })
+    .limit(150);
+  if (error) throw error;
+  return ((data ?? []) as Array<Record<string, unknown>>).map((row) => ({
+    ebayTitle: String(row.ebay_title ?? ''),
+    scpProductName: row.scp_product_name ? String(row.scp_product_name) : null,
+    needsReview: Boolean(row.needs_review),
+  }));
+}
+
 export async function getRecentBadLogicPatterns(limit = 250): Promise<BadLogicMemoryRow[]> {
   const { data, error } = await getSupabase()
     .from('scan_results')
