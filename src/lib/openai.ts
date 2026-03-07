@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import type { ResponseInputContent, ResponseInputItem } from 'openai/resources/responses/responses';
 import type { ScpCandidate } from '@/lib/scp';
-import type { EbayListing } from '@/lib/ebay';
+import type { EbayListing, EbayListingDetails } from '@/lib/ebay';
 import { getRequiredEnv } from '@/lib/env';
 
 function getOpenAiClient() {
@@ -20,7 +20,7 @@ export type MatchDecision = {
 export async function verifyCardMatchWithOpenAI(
   listing: EbayListing,
   candidates: ScpCandidate[],
-  options?: { ximilarHints?: string[] | null },
+  options?: { ximilarHints?: string[] | null; details?: EbayListingDetails | null },
 ): Promise<MatchDecision> {
   const inputPayload = {
     listing: {
@@ -29,6 +29,16 @@ export async function verifyCardMatchWithOpenAI(
       condition: listing.condition,
       imageUrl: listing.imageUrl,
       purchaseTotal: listing.total,
+      subtitle: options?.details?.subtitle ?? null,
+      description: options?.details?.description ?? null,
+      aspects: options?.details?.aspectMap ?? {},
+      seller: options?.details
+        ? {
+            username: options.details.sellerUsername,
+            feedbackPercentage: options.details.sellerFeedbackPercentage,
+            feedbackScore: options.details.sellerFeedbackScore,
+          }
+        : null,
     },
     ximilarHints: options?.ximilarHints ?? [],
     candidates: candidates.map((candidate) => ({
@@ -48,10 +58,15 @@ export async function verifyCardMatchWithOpenAI(
     },
   ];
 
-  if (listing.imageUrl) {
+  const imageUrls = [listing.imageUrl, ...(options?.details?.imageUrls ?? [])]
+    .filter((value): value is string => Boolean(value))
+    .filter((value, index, arr) => arr.indexOf(value) === index)
+    .slice(0, 2);
+
+  for (const imageUrl of imageUrls) {
     userContent.push({
       type: 'input_image',
-      image_url: listing.imageUrl,
+      image_url: imageUrl,
       detail: 'high',
     });
   }
@@ -63,7 +78,7 @@ export async function verifyCardMatchWithOpenAI(
         {
           type: 'input_text',
           text:
-            'You match sports card eBay listings to the exact SportsCardsPro card record. Be conservative. Only return exactMatch true when you are highly confident in exact set, player, parallel, insert, numbering, autograph or relic status, grading context, and card number. Use the image when available. Return JSON only.',
+            'You match sports card eBay listings to the exact SportsCardsPro card record. Be conservative. Only return exactMatch true when you are highly confident in exact set, player, parallel, insert, numbering, autograph or relic status, grading context, and card number. Use the image, seller listing details, subtitle, description, and item specifics when available. Return JSON only.',
         },
       ],
     },

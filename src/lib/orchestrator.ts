@@ -1,4 +1,4 @@
-import { searchEbayListings, type EbayListing } from '@/lib/ebay';
+import { getEbayListingDetails, searchEbayListings, type EbayListing, type EbayListingDetails } from '@/lib/ebay';
 import {
   addScanEvent,
   appendMetrics,
@@ -13,7 +13,7 @@ import {
   updateCandidate,
   upsertDedupeItem,
 } from '@/lib/db';
-import { shouldRejectTitle } from '@/lib/filters';
+import { shouldRejectListingDetails, shouldRejectTitle } from '@/lib/filters';
 import { verifyCardMatchWithOpenAI } from '@/lib/openai';
 import {
   getSportsCardsProProduct,
@@ -23,12 +23,12 @@ import {
   type ScpCandidate,
 } from '@/lib/scp';
 import { identifyWithXimilar } from '@/lib/ximilar';
-import { compactWhitespace, tokenizeLoose } from '@/lib/utils';
+import { compactWhitespace, normalizeTitleFingerprint, tokenizeLoose } from '@/lib/utils';
 import type { SearchForm, ScanSummary } from '@/types/app';
 
 const TARGET_RESULTS = 10;
 const FETCH_PAGE_SIZE = 40;
-const MAX_CANDIDATES_PER_TICK = 4;
+const MAX_CANDIDATES_PER_TICK = 3;
 const AUTO_ACCEPT_CONFIDENCE = 90;
 
 export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
@@ -114,22 +114,40 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
 }
 
 async function evaluateListing(scanId: string, candidateId: string, listing: EbayListing, filters: SearchForm): Promise<void> {
-  await markScanStatus(scanId, 'matching_scp', 'Matching SportsCardsPro candidates');
+  await markScanStatus(scanId, 'matching_scp', 'Inspecting listing and matching SportsCardsPro candidates');
   await updateCandidate(candidateId, { stage: 'matching_scp' });
   await appendMetrics(scanId, { candidatesEvaluated: 1 });
+
+  const details = await getEbayDetailsWithLogging(scanId, listing);
+  if (details) {
+    const detailRejection = shouldRejectListingDetails(details, filters);
+    if (detailRejection) {
+      await updateCandidate(candidateId, { stage: 'filtered_out', rejection_reason: detailRejection });
+      await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+      await addScanEvent(scanId, 'info', 'filtering', detailRejection, listing.title);
+      return;
+    }
+  }
 
   const override = await getManualMatchOverride(listing.title);
   if (override) {
     await addScanEvent(scanId, 'info', 'matching_scp', 'Applied saved manual override', `${listing.title} -> ${override.scpProductName}`);
   }
 
-  const ximilarHints = shouldUseXimilar(listing.title, listing.imageUrl) ? await identifyWithXimilar([listing.imageUrl!].filter(Boolean)) : null;
+  const imageUrlsForAi = [listing.imageUrl, ...(details?.imageUrls ?? [])]
+    .filter((value): value is string => Boolean(value))
+    .filter((value, index, arr) => arr.indexOf(value) === index)
+    .slice(0, 2);
+
+  const ximilarHints = shouldUseXimilar(listing, details)
+    ? await identifyWithXimilar(imageUrlsForAi)
+    : null;
   if (ximilarHints) {
     await incrementUsage('ximilar', ximilarHints.callCount);
     await appendMetrics(scanId, { ximilarCalls: ximilarHints.callCount });
   }
 
-  const scpQuery = buildScpQuery(listing.title, ximilarHints?.titleHints ?? []);
+  const scpQuery = buildScpQuery(listing, details, ximilarHints?.titleHints ?? []);
   const baseCandidates = await searchSportsCardsProCandidates(scpQuery);
   await incrementUsage('scp', 1);
   await appendMetrics(scanId, { scpCalls: 1 });
@@ -141,18 +159,18 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
   }
 
   let candidatePool = [...baseCandidates];
-  const hydratedBase = await hydrateSportsCardsProCandidates(rankScpCandidatesLocally(listing.title, baseCandidates).slice(0, 5).map((row) => row.productId));
+  const hydratedBase = await hydrateSportsCardsProCandidates(rankScpCandidatesLocally(listing, details, baseCandidates).slice(0, 5).map((row) => row.productId));
   if (hydratedBase.length > 0) {
     await incrementUsage('scp', hydratedBase.length);
     await appendMetrics(scanId, { scpCalls: hydratedBase.length });
     candidatePool = mergeCandidates(candidatePool, hydratedBase);
   }
 
-  const likelyConsole = hydratedBase[0]?.consoleName ?? candidatePool[0]?.consoleName ?? null;
+  const likelyConsole = hydratedBase[0]?.consoleName ?? candidatePool[0]?.consoleName ?? inferConsoleFromListing(listing, details);
   if (likelyConsole) {
     const cachedCsv = await getScpCacheCsvText(likelyConsole);
     if (cachedCsv) {
-      const cacheCandidates = searchScpCsvCandidates(cachedCsv, scpQuery, 12);
+      const cacheCandidates = searchScpCsvCandidates(cachedCsv, scpQuery, 16);
       candidatePool = mergeCandidates(candidatePool, cacheCandidates);
       await addScanEvent(scanId, 'info', 'matching_scp', 'Loaded SCP set cache', likelyConsole);
     }
@@ -196,8 +214,11 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
   }
 
   await markScanStatus(scanId, 'ai_verifying', 'Verifying exact match with OpenAI');
-  const rankedCandidates = rankScpCandidatesLocally(listing.title, candidatePool).slice(0, 5);
-  const decision = await verifyCardMatchWithOpenAI(listing, rankedCandidates, { ximilarHints: ximilarHints?.titleHints ?? [] });
+  const rankedCandidates = rankScpCandidatesLocally(listing, details, candidatePool).slice(0, 5);
+  const decision = await verifyCardMatchWithOpenAI(listing, rankedCandidates, {
+    ximilarHints: ximilarHints?.titleHints ?? [],
+    details,
+  });
   await incrementUsage('openai', 1);
   await appendMetrics(scanId, { openaiCalls: 1 });
 
@@ -230,6 +251,19 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
   await appendMetrics(scanId, { dealsFound: 1 });
   await updateCandidate(candidateId, { stage: 'accepted', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning, scp_product_id: chosen.productId });
   await addScanEvent(scanId, 'info', 'publishing_results', 'Added deal result', `${listing.title}\nConfidence ${decision.confidence}`);
+}
+
+async function getEbayDetailsWithLogging(scanId: string, listing: EbayListing): Promise<EbayListingDetails | null> {
+  try {
+    const details = await getEbayListingDetails(listing.itemId);
+    await incrementUsage('ebay', 1);
+    await appendMetrics(scanId, { ebayCalls: 1 });
+    return details;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Unable to load eBay item details';
+    await addScanEvent(scanId, 'warning', 'matching_scp', 'Failed to hydrate eBay item details', `${listing.title}\n${message}`);
+    return null;
+  }
 }
 
 async function insertResultPayload(
@@ -278,48 +312,76 @@ function reviewOptionPayload(candidate: ScpCandidate, rank: number, confidence: 
   };
 }
 
-function shouldUseXimilar(title: string, imageUrl: string | null): boolean {
-  if (!imageUrl) return false;
-  const lower = title.toLowerCase();
+function shouldUseXimilar(listing: EbayListing, details: EbayListingDetails | null): boolean {
+  const imageCount = [listing.imageUrl, ...(details?.imageUrls ?? [])].filter(Boolean).length;
+  if (imageCount === 0) return false;
+  const lower = `${listing.title} ${details?.subtitle ?? ''}`.toLowerCase();
   return !/#[a-z0-9]+/.test(lower) || lower.includes('prizm') || lower.includes('mosaic') || lower.includes('optic') || lower.includes('refractor');
 }
 
-function buildScpQuery(title: string, hints: string[]): string {
-  const tokens = tokenizeLoose(`${title} ${hints.join(' ')}`)
+function buildScpQuery(listing: EbayListing, details: EbayListingDetails | null, hints: string[]): string {
+  const pieces = [
+    listing.title,
+    details?.subtitle ?? '',
+    ...(details ? buildAspectHints(details.aspectMap) : []),
+    hints.join(' '),
+  ];
+  const tokens = tokenizeLoose(pieces.join(' '))
     .filter((token) => token.length > 1)
-    .slice(0, 16);
+    .slice(0, 20);
   return compactWhitespace(tokens.join(' '));
 }
 
-function rankScpCandidatesLocally(title: string, candidates: ScpCandidate[]): ScpCandidate[] {
-  const lower = title.toLowerCase();
-  return [...candidates].sort((a, b) => scoreCandidate(lower, b) - scoreCandidate(lower, a));
+function buildAspectHints(aspects: Record<string, string[]>): string[] {
+  const keys = ['manufacturer', 'set', 'insert set', 'parallel variety', 'card number', 'athlete', 'team', 'features'];
+  return keys.flatMap((key) => aspects[key] ?? []).slice(0, 10);
 }
 
-function scoreCandidate(title: string, candidate: ScpCandidate): number {
+function rankScpCandidatesLocally(listing: EbayListing, details: EbayListingDetails | null, candidates: ScpCandidate[]): ScpCandidate[] {
+  const fingerprint = normalizeTitleFingerprint(`${listing.title} ${details?.subtitle ?? ''}`);
+  return [...candidates].sort((a, b) => scoreCandidate(fingerprint, listing, details, b) - scoreCandidate(fingerprint, listing, details, a));
+}
+
+function scoreCandidate(fingerprint: string, listing: EbayListing, details: EbayListingDetails | null, candidate: ScpCandidate): number {
   const haystack = `${candidate.productName} ${candidate.consoleName ?? ''}`.toLowerCase();
   let score = 0;
 
-  for (const token of tokenizeLoose(candidate.productName)) {
-    if (token.length > 2 && title.includes(token)) score += 3;
-    if (token.startsWith('#') && title.includes(token)) score += 12;
+  for (const token of tokenizeLoose(fingerprint)) {
+    if (token.length > 2 && haystack.includes(token)) score += token.startsWith('#') ? 12 : 3;
   }
 
   const numberMatch = candidate.productName.match(/#([a-z0-9-]+)/i);
-  if (numberMatch && title.includes(`#${numberMatch[1].toLowerCase()}`)) score += 16;
+  if (numberMatch && fingerprint.includes(`#${numberMatch[1].toLowerCase()}`)) score += 18;
 
   const bracketMatch = candidate.productName.match(/\[[^\]]+\]/g) ?? [];
   for (const variant of bracketMatch) {
-    if (title.includes(variant.toLowerCase().replace(/[\[\]]/g, ''))) score += 10;
+    const normalizedVariant = variant.toLowerCase().replace(/[\[\]]/g, '');
+    if (fingerprint.includes(normalizedVariant)) score += 10;
   }
 
-  if (/\[rc\]|rookie/i.test(candidate.productName) && /rookie|\brc\b/i.test(title)) score += 4;
-  if (/auto|autograph/i.test(candidate.productName) && /auto|autograph/i.test(title)) score += 6;
-  if (/memorabilia|patch|relic/i.test(candidate.productName) && /memorabilia|patch|relic/i.test(title)) score += 6;
+  if (/\[rc\]|rookie/i.test(candidate.productName) && /rookie|\brc\b/i.test(fingerprint)) score += 4;
+  if (/auto|autograph/i.test(candidate.productName) && /auto|autograph|signed/i.test(fingerprint)) score += 6;
+  if (/memorabilia|patch|relic|jersey/i.test(candidate.productName) && /memorabilia|patch|relic|jersey/i.test(fingerprint)) score += 6;
   if (candidate.ungradedSell !== null) score += 1;
-  if (candidate.source === 'cache') score += 1;
+  if (candidate.source === 'cache') score += 2;
 
+  const aspectSignals = details ? buildAspectHints(details.aspectMap).join(' ').toLowerCase() : '';
+  if (aspectSignals) {
+    for (const token of tokenizeLoose(aspectSignals)) {
+      if (token.length > 2 && haystack.includes(token)) score += 2;
+    }
+  }
+
+  if (listing.condition?.toLowerCase().includes('graded') && /psa|bgs|sgc|graded/i.test(candidate.productName)) score += 3;
   return score;
+}
+
+function inferConsoleFromListing(listing: EbayListing, details: EbayListingDetails | null): string | null {
+  const setValue = details?.aspectMap.set?.[0] ?? details?.aspectMap['insert set']?.[0] ?? null;
+  const manufacturer = details?.aspectMap.manufacturer?.[0] ?? null;
+  const year = listing.title.match(/\b(19|20)\d{2}\b/)?.[0] ?? null;
+  if (!manufacturer || !setValue || !year) return null;
+  return `${listing.title.toLowerCase().includes('football') ? 'football cards' : ''} ${year} ${manufacturer} ${setValue}`.replace(/\s+/g, ' ').trim();
 }
 
 function mergeCandidates(...groups: ScpCandidate[][]): ScpCandidate[] {

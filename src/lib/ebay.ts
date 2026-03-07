@@ -1,5 +1,6 @@
 import { buildKeywordClauses, buildNegativeClauses } from '@/lib/filters';
 import { getRequiredEnv } from '@/lib/env';
+import { compactWhitespace } from '@/lib/utils';
 import type { SearchForm } from '@/types/app';
 
 export type EbayListing = {
@@ -12,6 +13,19 @@ export type EbayListing = {
   total: number;
   auctionEndsAt: string | null;
   condition: string | null;
+};
+
+export type EbayListingDetails = {
+  itemId: string;
+  title: string;
+  subtitle: string | null;
+  description: string | null;
+  condition: string | null;
+  aspectMap: Record<string, string[]>;
+  sellerUsername: string | null;
+  sellerFeedbackPercentage: number | null;
+  sellerFeedbackScore: number | null;
+  imageUrls: string[];
 };
 
 type EbayTokenResponse = {
@@ -120,6 +134,84 @@ export async function searchEbayListings(filters: SearchForm, offset = 0, limit 
   return filters.listingMode === 'auction' && filters.auctionHours
     ? listings.filter((listing) => isWithinAuctionWindow(listing.auctionEndsAt, filters.auctionHours ?? null))
     : listings;
+}
+
+export async function getEbayListingDetails(itemId: string): Promise<EbayListingDetails | null> {
+  const token = await getEbayAccessToken();
+  const environment = process.env.EBAY_ENVIRONMENT === 'sandbox' ? 'api.sandbox.ebay.com' : 'api.ebay.com';
+
+  const response = await fetch(`https://${environment}/buy/browse/v1/item/${encodeURIComponent(itemId)}`, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'X-EBAY-C-MARKETPLACE-ID': 'EBAY_US',
+    },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`eBay item lookup failed (${response.status}): ${text}`);
+  }
+
+  const body = (await response.json()) as {
+    itemId?: string;
+    title?: string;
+    subtitle?: string;
+    shortDescription?: string;
+    description?: string;
+    condition?: string;
+    localizedAspects?: Array<{ name?: string; value?: string }>;
+    seller?: {
+      username?: string;
+      feedbackPercentage?: string | number;
+      feedbackScore?: number;
+    };
+    image?: { imageUrl?: string };
+    additionalImages?: Array<{ imageUrl?: string }>;
+  };
+
+  if (!body.itemId || !body.title) return null;
+
+  const imageUrls = uniqueStrings([
+    body.image?.imageUrl ?? null,
+    ...(body.additionalImages ?? []).map((image) => image.imageUrl ?? null),
+  ]);
+
+  return {
+    itemId: body.itemId,
+    title: body.title,
+    subtitle: body.subtitle ? compactWhitespace(body.subtitle) : null,
+    description: body.description ? compactWhitespace(body.description) : body.shortDescription ? compactWhitespace(body.shortDescription) : null,
+    condition: body.condition ?? null,
+    aspectMap: mapLocalizedAspects(body.localizedAspects ?? []),
+    sellerUsername: body.seller?.username ?? null,
+    sellerFeedbackPercentage: body.seller?.feedbackPercentage === undefined || body.seller?.feedbackPercentage === null
+      ? null
+      : Number(String(body.seller.feedbackPercentage).replace(/%/g, '')),
+    sellerFeedbackScore: body.seller?.feedbackScore === undefined || body.seller?.feedbackScore === null ? null : Number(body.seller.feedbackScore),
+    imageUrls,
+  };
+}
+
+function mapLocalizedAspects(aspects: Array<{ name?: string; value?: string }>): Record<string, string[]> {
+  const output: Record<string, string[]> = {};
+  for (const aspect of aspects) {
+    const name = normalizeAspectName(aspect.name ?? '');
+    const value = compactWhitespace(aspect.value ?? '');
+    if (!name || !value) continue;
+    output[name] ||= [];
+    if (!output[name].includes(value)) output[name].push(value);
+  }
+  return output;
+}
+
+function normalizeAspectName(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function uniqueStrings(values: Array<string | null | undefined>): string[] {
+  return values.filter((value): value is string => Boolean(value)).filter((value, index, arr) => arr.indexOf(value) === index);
 }
 
 function sportToCategoryId(sport: string): string {

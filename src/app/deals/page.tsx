@@ -6,6 +6,7 @@ import { createSupabaseBrowserClient } from '@/lib/supabase';
 import { SearchForm } from '@/components/SearchForm';
 import { ResultsTable } from '@/components/ResultsTable';
 import { DiagnosticsPanel } from '@/components/DiagnosticsPanel';
+import { ScpCacheUploader } from '@/components/ScpCacheUploader';
 import type { DashboardSnapshot, Disposition, SearchForm as SearchFormType } from '@/types/app';
 import { toCurrency } from '@/lib/utils';
 
@@ -182,6 +183,7 @@ export default function DealsPage() {
         </div>
 
         <SearchForm onStart={startScan} isBusy={busy || Boolean(dashboard.activeScan)} />
+        <ScpCacheUploader />
 
         <ResultsTable title="Deals" rows={dashboard.visibleResults} onDisposition={setDisposition} />
         <ResultsTable

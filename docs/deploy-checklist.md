@@ -50,3 +50,9 @@ Examples:
 When a cached file exists, the scan engine will merge those rows into the normal SCP API candidate pool before OpenAI verification.
 
 Manual review picks now save a reusable override automatically, so when you correct a match once, future near-identical titles can auto-apply that product without sending the row back to review.
+
+
+## SCP CSV uploads in the app
+
+After deployment, you can upload a SportsCardsPro CSV directly from the Deals page. The app stores it in the `scp-csv-cache` bucket and indexes it in `scp_set_cache_index`, so later scans can merge cached set rows before calling OpenAI.
+
