@@ -7,6 +7,7 @@ import { SearchForm } from '@/components/SearchForm';
 import { ResultsTable } from '@/components/ResultsTable';
 import { DiagnosticsPanel } from '@/components/DiagnosticsPanel';
 import { ScpCacheUploader } from '@/components/ScpCacheUploader';
+import { ScpCacheLibrary } from '@/components/ScpCacheLibrary';
 import type { DashboardSnapshot, Disposition, SearchForm as SearchFormType } from '@/types/app';
 import { toCurrency, toTitleLabel } from '@/lib/utils';
 
@@ -21,12 +22,14 @@ const EMPTY_DASHBOARD: DashboardSnapshot = {
     topRejectionReasons: [],
     stageTimings: [],
   },
+  scpCaches: [],
   usage: {
     openAiCostTodayUsd: null,
     ebayCallsToday: 0,
     scpCallsToday: 0,
     openAiCallsToday: 0,
     ximilarCallsToday: 0,
+    providerLimits: [],
   },
 };
 
@@ -199,6 +202,30 @@ export default function DealsPage() {
           ))}
         </div>
 
+        {dashboard.usage.providerLimits.length > 0 ? (
+          <div className="card card-pad stack">
+            <div className="spread">
+              <div>
+                <div className="section-title">API Guardrails</div>
+                <div className="muted small">The worker will stop scans if a configured daily call budget is reached.</div>
+              </div>
+            </div>
+            <div className="grid grid-4">
+              {dashboard.usage.providerLimits.map((limit) => (
+                <div key={limit.provider} className="kpi">
+                  <div className="small muted">{toTitleLabel(limit.provider)} Budget</div>
+                  <div className="kpi-value" style={{ fontSize: '1rem' }}>
+                    {limit.limit === null ? `${limit.used} used` : `${limit.used} / ${limit.limit}`}
+                  </div>
+                  <div className="small" style={{ color: limit.isExceeded ? '#ff7b7b' : limit.isNearLimit ? '#ffd166' : '#9ca8bd' }}>
+                    {limit.isExceeded ? 'Limit reached' : limit.isNearLimit ? 'Near limit' : limit.limit === null ? 'No cap set' : `${limit.remaining ?? 0} remaining`}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
         {scanContext ? (
           <div className="card card-pad stack">
             <div className="spread">
@@ -241,7 +268,10 @@ export default function DealsPage() {
         ) : null}
 
         <SearchForm onStart={startScan} isBusy={busy || Boolean(dashboard.activeScan)} />
-        <ScpCacheUploader />
+        <div className="grid grid-2">
+          <ScpCacheUploader />
+          <ScpCacheLibrary caches={dashboard.scpCaches} />
+        </div>
 
         <ResultsTable title="Deals" rows={dashboard.visibleResults} onDisposition={setDisposition} />
         <ResultsTable

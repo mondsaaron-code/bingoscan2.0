@@ -2,9 +2,11 @@ import { getEbayListingDetails, searchEbayListings, type EbayListing, type EbayL
 import {
   addScanEvent,
   appendMetrics,
+  findScpCacheMatches,
+  getExceededUsageLimits,
   getManualMatchOverride,
   getScanById,
-  getScpCacheCsvText,
+  getScpCacheCsvTextByStoragePath,
   incrementUsage,
   insertCandidate,
   insertResult,
@@ -39,6 +41,16 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
 
   if (scan.status === 'cancelled' || scan.status === 'completed' || scan.status === 'failed') {
     return scan;
+  }
+
+  const exceededLimits = await getExceededUsageLimits();
+  if (exceededLimits.length > 0) {
+    const message = exceededLimits
+      .map((row) => `${row.provider.toUpperCase()} daily call limit reached (${row.used}/${row.limit})`)
+      .join('; ');
+    await markScanStatus(scanId, 'failed', message);
+    await addScanEvent(scanId, 'warning', 'guardrails', message);
+    return (await getScanById(scanId))!;
   }
 
   const currentResults = scan.metrics.dealsFound + scan.metrics.needsReview;
@@ -152,12 +164,6 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
   await incrementUsage('scp', 1);
   await appendMetrics(scanId, { scpCalls: 1 });
 
-  if (baseCandidates.length === 0 && !override) {
-    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: 'No SportsCardsPro candidates found' });
-    await addScanEvent(scanId, 'warning', 'matching_scp', 'No SCP candidates found', listing.title);
-    return;
-  }
-
   let candidatePool = [...baseCandidates];
   const hydratedBase = await hydrateSportsCardsProCandidates(rankScpCandidatesLocally(listing, details, baseCandidates).slice(0, 5).map((row) => row.productId));
   if (hydratedBase.length > 0) {
@@ -166,14 +172,27 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
     candidatePool = mergeCandidates(candidatePool, hydratedBase);
   }
 
-  const likelyConsole = hydratedBase[0]?.consoleName ?? candidatePool[0]?.consoleName ?? inferConsoleFromListing(listing, details);
-  if (likelyConsole) {
-    const cachedCsv = await getScpCacheCsvText(likelyConsole);
-    if (cachedCsv) {
-      const cacheCandidates = searchScpCsvCandidates(cachedCsv, scpQuery, 16);
+  const cacheHints = buildScpCacheHints(listing, details, filters, candidatePool, hydratedBase, ximilarHints?.titleHints ?? []);
+  const matchedCaches = await findScpCacheMatches(cacheHints, 3);
+  const loadedCacheNames: string[] = [];
+  for (const cacheEntry of matchedCaches.slice(0, 2)) {
+    if (!cacheEntry.storagePath) continue;
+    const cachedCsv = await getScpCacheCsvTextByStoragePath(cacheEntry.storagePath);
+    if (!cachedCsv) continue;
+    const cacheCandidates = searchScpCsvCandidates(cachedCsv, scpQuery, 16);
+    if (cacheCandidates.length > 0) {
       candidatePool = mergeCandidates(candidatePool, cacheCandidates);
-      await addScanEvent(scanId, 'info', 'matching_scp', 'Loaded SCP set cache', likelyConsole);
+      loadedCacheNames.push(cacheEntry.consoleName);
     }
+  }
+  if (loadedCacheNames.length > 0) {
+    await addScanEvent(scanId, 'info', 'matching_scp', 'Loaded SCP set cache', loadedCacheNames.join(' • '));
+  }
+
+  if (candidatePool.length === 0 && !override) {
+    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: 'No SportsCardsPro candidates found' });
+    await addScanEvent(scanId, 'warning', 'matching_scp', 'No SCP candidates found', listing.title);
+    return;
   }
 
   if (override) {
@@ -332,6 +351,58 @@ function buildScpQuery(listing: EbayListing, details: EbayListingDetails | null,
   return compactWhitespace(tokens.join(' '));
 }
 
+
+function buildScpCacheHints(
+  listing: EbayListing,
+  details: EbayListingDetails | null,
+  filters: SearchForm,
+  candidatePool: ScpCandidate[],
+  hydratedBase: ScpCandidate[],
+  ximilarHints: string[],
+): string[] {
+  const hints = new Set<string>();
+  const inferredConsole = inferConsoleFromListing(listing, details, filters);
+  if (inferredConsole) hints.add(inferredConsole);
+
+  const fromFilters = inferConsoleFromFilters(filters);
+  if (fromFilters) hints.add(fromFilters);
+
+  for (const candidate of [...hydratedBase, ...candidatePool].slice(0, 8)) {
+    if (candidate.consoleName) hints.add(candidate.consoleName);
+  }
+
+  const year = extractPrimaryYear(`${listing.title} ${details?.subtitle ?? ''}`);
+  if (year && filters.brand) {
+    hints.add(`${filters.sport} cards ${year} ${filters.brand}`);
+  }
+  if (year && filters.brand && filters.variant) {
+    hints.add(`${filters.sport} cards ${year} ${filters.brand} ${filters.variant}`);
+  }
+  if (year && filters.brand && filters.insert) {
+    hints.add(`${filters.sport} cards ${year} ${filters.brand} ${filters.insert}`);
+  }
+
+  for (const hint of ximilarHints.slice(0, 4)) {
+    hints.add(hint);
+  }
+
+  hints.add(listing.title);
+  if (details?.subtitle) hints.add(details.subtitle);
+
+  return [...hints].map((value) => compactWhitespace(value)).filter(Boolean);
+}
+
+function inferConsoleFromFilters(filters: SearchForm): string | null {
+  const year = filters.startYear && filters.endYear && filters.startYear === filters.endYear ? filters.startYear : filters.startYear ?? filters.endYear ?? null;
+  const pieces = [filters.sport ? `${filters.sport} cards` : '', year ? String(year) : '', filters.brand ?? '', filters.variant ?? filters.insert ?? ''];
+  const output = compactWhitespace(pieces.join(' '));
+  return output || null;
+}
+
+function extractPrimaryYear(value: string): string | null {
+  return value.match(/\b(19|20)\d{2}\b/)?.[0] ?? null;
+}
+
 function buildAspectHints(aspects: Record<string, string[]>): string[] {
   const keys = ['manufacturer', 'set', 'insert set', 'parallel variety', 'card number', 'athlete', 'team', 'features'];
   return keys.flatMap((key) => aspects[key] ?? []).slice(0, 10);
@@ -376,12 +447,13 @@ function scoreCandidate(fingerprint: string, listing: EbayListing, details: Ebay
   return score;
 }
 
-function inferConsoleFromListing(listing: EbayListing, details: EbayListingDetails | null): string | null {
-  const setValue = details?.aspectMap.set?.[0] ?? details?.aspectMap['insert set']?.[0] ?? null;
-  const manufacturer = details?.aspectMap.manufacturer?.[0] ?? null;
-  const year = listing.title.match(/\b(19|20)\d{2}\b/)?.[0] ?? null;
+function inferConsoleFromListing(listing: EbayListing, details: EbayListingDetails | null, filters?: SearchForm): string | null {
+  const setValue = details?.aspectMap.set?.[0] ?? details?.aspectMap['insert set']?.[0] ?? filters?.variant ?? filters?.insert ?? null;
+  const manufacturer = details?.aspectMap.manufacturer?.[0] ?? filters?.brand ?? null;
+  const year = extractPrimaryYear(`${listing.title} ${details?.subtitle ?? ''}`) ?? (filters?.startYear ? String(filters.startYear) : null);
+  const sportPrefix = filters?.sport ? `${filters.sport} cards` : listing.title.toLowerCase().includes('football') ? 'football cards' : '';
   if (!manufacturer || !setValue || !year) return null;
-  return `${listing.title.toLowerCase().includes('football') ? 'football cards' : ''} ${year} ${manufacturer} ${setValue}`.replace(/\s+/g, ' ').trim();
+  return `${sportPrefix} ${year} ${manufacturer} ${setValue}`.replace(/\s+/g, ' ').trim();
 }
 
 function mergeCandidates(...groups: ScpCandidate[][]): ScpCandidate[] {

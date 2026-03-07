@@ -1,13 +1,16 @@
 import { createSupabaseAdminClient } from '@/lib/supabase';
 import { getOpenAiTodayCostUsd } from '@/lib/openai-admin';
-import { normalizeTitleFingerprint, safeJsonParse, slugify } from '@/lib/utils';
+import { normalizeTitleFingerprint, safeJsonParse, slugify, tokenizeLoose } from '@/lib/utils';
 import type {
   DashboardSnapshot,
   Disposition,
+  ProviderLimitStatus,
+  ProviderName,
   ReviewOption,
   ScanMetrics,
   ScanResultRow,
   ScanSummary,
+  ScpCacheEntry,
   SearchForm,
   ScanStatus,
 } from '@/types/app';
@@ -17,6 +20,89 @@ function getSupabase() {
 }
 
 const ACTIVE_SCAN_STATUSES: ScanStatus[] = ['queued', 'fetching_ebay', 'filtering', 'matching_scp', 'ai_verifying', 'publishing_results'];
+
+
+const PROVIDER_LIMIT_ENV: Record<ProviderName, string> = {
+  ebay: 'EBAY_DAILY_CALL_LIMIT',
+  scp: 'SCP_DAILY_CALL_LIMIT',
+  openai: 'OPENAI_DAILY_CALL_LIMIT',
+  ximilar: 'XIMILAR_DAILY_CALL_LIMIT',
+};
+
+type UsageRow = {
+  usage_date: string;
+  ebay_calls: number;
+  scp_calls: number;
+  openai_calls: number;
+  ximilar_calls: number;
+  openai_cost_usd: number;
+};
+
+function getProviderLimit(provider: ProviderName): number | null {
+  const raw = process.env[PROVIDER_LIMIT_ENV[provider]];
+  if (!raw) return provider === 'ebay' ? 4500 : null;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function emptyUsageRow(today: string): UsageRow {
+  return {
+    usage_date: today,
+    ebay_calls: 0,
+    scp_calls: 0,
+    openai_calls: 0,
+    ximilar_calls: 0,
+    openai_cost_usd: 0,
+  };
+}
+
+function getProviderUsedCount(row: Partial<UsageRow> | null | undefined, provider: ProviderName): number {
+  if (!row) return 0;
+  if (provider === 'ebay') return Number(row.ebay_calls ?? 0);
+  if (provider === 'scp') return Number(row.scp_calls ?? 0);
+  if (provider === 'openai') return Number(row.openai_calls ?? 0);
+  return Number(row.ximilar_calls ?? 0);
+}
+
+function buildProviderLimitStatuses(row: Partial<UsageRow> | null | undefined): ProviderLimitStatus[] {
+  return (['ebay', 'scp', 'openai', 'ximilar'] as ProviderName[]).map((provider) => {
+    const used = getProviderUsedCount(row, provider);
+    const limit = getProviderLimit(provider);
+    const remaining = limit === null ? null : Math.max(0, limit - used);
+    const isExceeded = limit !== null && used >= limit;
+    const isNearLimit = limit !== null && !isExceeded && used >= Math.floor(limit * 0.85);
+    return {
+      provider,
+      used,
+      limit,
+      remaining,
+      isNearLimit,
+      isExceeded,
+    } satisfies ProviderLimitStatus;
+  });
+}
+
+function scoreScpCacheEntry(entry: ScpCacheEntry, hints: string[]): number {
+  const haystack = `${entry.consoleName} ${entry.cacheKey} ${entry.sourceConsoleUrl ?? ''}`.toLowerCase();
+  let score = 0;
+  const tokenSet = new Set<string>();
+
+  for (const hint of hints) {
+    for (const token of tokenizeLoose(hint)) {
+      if (token.length > 2) tokenSet.add(token);
+    }
+  }
+
+  for (const token of tokenSet) {
+    if (haystack.includes(token)) score += /^\d{4}$/.test(token) ? 10 : 4;
+  }
+
+  const joinedHints = hints.join(' ').toLowerCase();
+  if (joinedHints && haystack.includes(joinedHints)) score += 16;
+  if (entry.consoleName && hints.some((hint) => slugify(hint) === slugify(entry.consoleName))) score += 20;
+  if (entry.sourceConsoleUrl && hints.some((hint) => entry.sourceConsoleUrl?.toLowerCase().includes(slugify(hint)))) score += 6;
+  return score;
+}
 
 export async function getActiveScan(): Promise<ScanSummary | null> {
   const { data, error } = await getSupabase()
@@ -229,11 +315,53 @@ export async function getScpCacheCsvText(consoleName: string): Promise<string | 
     .eq('cache_key', cacheKey)
     .maybeSingle();
   if (indexError) throw indexError;
-  if (!indexRow?.storage_path) return null;
+  if (indexRow?.storage_path) {
+    return getScpCacheCsvTextByStoragePath(String(indexRow.storage_path));
+  }
 
-  const { data, error } = await getSupabase().storage.from('scp-csv-cache').download(String(indexRow.storage_path));
+  const fuzzy = await findScpCacheMatches([consoleName], 1);
+  if (fuzzy[0]?.storagePath) {
+    return getScpCacheCsvTextByStoragePath(fuzzy[0].storagePath);
+  }
+
+  return null;
+}
+
+export async function getScpCacheCsvTextByStoragePath(storagePath: string): Promise<string | null> {
+  if (!storagePath) return null;
+  const { data, error } = await getSupabase().storage.from('scp-csv-cache').download(storagePath);
   if (error || !data) return null;
   return await data.text();
+}
+
+export async function listScpCaches(limit = 12): Promise<ScpCacheEntry[]> {
+  const { data, error } = await getSupabase()
+    .from('scp_set_cache_index')
+    .select('id,cache_key,console_name,source_console_url,storage_path,downloaded_at,updated_at')
+    .order('updated_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return ((data ?? []) as Array<Record<string, unknown>>).map(mapScpCacheEntry);
+}
+
+export async function findScpCacheMatches(hints: string[], limit = 3): Promise<ScpCacheEntry[]> {
+  const cleanedHints = hints.map((value) => value.trim()).filter(Boolean);
+  if (cleanedHints.length === 0) return [];
+
+  const { data, error } = await getSupabase()
+    .from('scp_set_cache_index')
+    .select('id,cache_key,console_name,source_console_url,storage_path,downloaded_at,updated_at')
+    .order('updated_at', { ascending: false })
+    .limit(200);
+  if (error) throw error;
+
+  return ((data ?? []) as Array<Record<string, unknown>>)
+    .map(mapScpCacheEntry)
+    .map((entry) => ({ entry, score: scoreScpCacheEntry(entry, cleanedHints) }))
+    .filter((row) => row.score > 0)
+    .sort((a, b) => b.score - a.score || (b.entry.updatedAt ?? '').localeCompare(a.entry.updatedAt ?? ''))
+    .slice(0, limit)
+    .map((row) => row.entry);
 }
 
 export async function upsertScpCacheCsv(consoleName: string, csvText: string, sourceConsoleUrl?: string | null): Promise<string> {
@@ -270,6 +398,7 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
     topRejectionReasons: [],
     stageTimings: [],
   };
+  const scpCaches = await listScpCaches();
 
   if (scanId && latestScan) {
     const [
@@ -330,22 +459,16 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
     reviewOptionsByResultId,
     diagnostics,
     diagnosticsSummary,
+    scpCaches,
     usage,
   };
 }
 
-export async function incrementUsage(provider: 'ebay' | 'scp' | 'openai' | 'ximilar', count = 1, costUsd = 0): Promise<void> {
+export async function incrementUsage(provider: ProviderName, count = 1, costUsd = 0): Promise<void> {
   const today = new Date().toISOString().slice(0, 10);
   const { data, error } = await getSupabase().from('api_usage_daily').select('*').eq('usage_date', today).maybeSingle();
   if (error) throw error;
-  const current = data ?? {
-    usage_date: today,
-    ebay_calls: 0,
-    scp_calls: 0,
-    openai_calls: 0,
-    ximilar_calls: 0,
-    openai_cost_usd: 0,
-  };
+  const current = (data as UsageRow | null) ?? emptyUsageRow(today);
   const patch = { ...current };
   if (provider === 'ebay') patch.ebay_calls += count;
   if (provider === 'scp') patch.scp_calls += count;
@@ -358,18 +481,26 @@ export async function incrementUsage(provider: 'ebay' | 'scp' | 'openai' | 'ximi
   if (upsertError) throw upsertError;
 }
 
-async function getUsageSnapshot(): Promise<DashboardSnapshot['usage']> {
+export async function getUsageSnapshot(): Promise<DashboardSnapshot['usage']> {
   const today = new Date().toISOString().slice(0, 10);
   const { data, error } = await getSupabase().from('api_usage_daily').select('*').eq('usage_date', today).maybeSingle();
   if (error) throw error;
+  const usageRow = (data as UsageRow | null) ?? emptyUsageRow(today);
   const exactCost = await getOpenAiTodayCostUsd();
   return {
-    openAiCostTodayUsd: exactCost ?? data?.openai_cost_usd ?? null,
-    ebayCallsToday: data?.ebay_calls ?? 0,
-    scpCallsToday: data?.scp_calls ?? 0,
-    openAiCallsToday: data?.openai_calls ?? 0,
-    ximilarCallsToday: data?.ximilar_calls ?? 0,
+    openAiCostTodayUsd: exactCost ?? usageRow.openai_cost_usd ?? null,
+    ebayCallsToday: usageRow.ebay_calls ?? 0,
+    scpCallsToday: usageRow.scp_calls ?? 0,
+    openAiCallsToday: usageRow.openai_calls ?? 0,
+    ximilarCallsToday: usageRow.ximilar_calls ?? 0,
+    providerLimits: buildProviderLimitStatuses(usageRow),
   };
+}
+
+
+export async function getExceededUsageLimits(): Promise<ProviderLimitStatus[]> {
+  const usage = await getUsageSnapshot();
+  return usage.providerLimits.filter((row) => row.isExceeded);
 }
 
 function mapScan(row: Record<string, unknown>): ScanSummary {
@@ -429,6 +560,19 @@ function mapReviewOption(row: Record<string, unknown>): ReviewOption {
   };
 }
 
+
+
+function mapScpCacheEntry(row: Record<string, unknown>): ScpCacheEntry {
+  return {
+    id: String(row.id),
+    cacheKey: String(row.cache_key ?? ''),
+    consoleName: String(row.console_name ?? ''),
+    sourceConsoleUrl: row.source_console_url ? String(row.source_console_url) : null,
+    storagePath: row.storage_path ? String(row.storage_path) : null,
+    downloadedAt: row.downloaded_at ? String(row.downloaded_at) : null,
+    updatedAt: row.updated_at ? String(row.updated_at) : null,
+  };
+}
 
 function buildTopRejectionReasons(rows: Array<Record<string, unknown>>): Array<{ reason: string; count: number }> {
   const counts = new Map<string, number>();

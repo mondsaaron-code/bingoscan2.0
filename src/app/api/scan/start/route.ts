@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { z } from 'zod';
-import { createScan, getActiveScan } from '@/lib/db';
+import { createScan, getActiveScan, getExceededUsageLimits } from '@/lib/db';
 
 const schema = z.object({
   sport: z.string().min(1),
@@ -31,6 +31,13 @@ export async function POST(request: Request) {
     const existing = await getActiveScan();
     if (existing) {
       return NextResponse.json({ error: 'A scan is already active. Cancel it before starting another.' }, { status: 409 });
+    }
+    const exceeded = await getExceededUsageLimits();
+    if (exceeded.length > 0) {
+      return NextResponse.json(
+        { error: exceeded.map((row) => `${row.provider.toUpperCase()} daily call limit reached (${row.used}/${row.limit})`).join('; ') },
+        { status: 409 },
+      );
     }
     const parsed = schema.parse(await request.json());
     const scan = await createScan(parsed);

@@ -12,6 +12,7 @@ export type ScanStatus =
   | 'failed';
 
 export type Disposition = 'purchased' | 'suppress_90_days' | 'bad_logic';
+export type ProviderName = 'ebay' | 'scp' | 'openai' | 'ximilar';
 
 export type SearchForm = {
   sport: string;
@@ -100,6 +101,25 @@ export type ScanSummary = {
   errorCount: number;
 };
 
+export type ScpCacheEntry = {
+  id: string;
+  cacheKey: string;
+  consoleName: string;
+  sourceConsoleUrl: string | null;
+  storagePath: string | null;
+  downloadedAt: string | null;
+  updatedAt: string | null;
+};
+
+export type ProviderLimitStatus = {
+  provider: ProviderName;
+  used: number;
+  limit: number | null;
+  remaining: number | null;
+  isNearLimit: boolean;
+  isExceeded: boolean;
+};
+
 export type DashboardSnapshot = {
   activeScan: ScanSummary | null;
   latestScan: ScanSummary | null;
@@ -118,11 +138,13 @@ export type DashboardSnapshot = {
     topRejectionReasons: Array<{ reason: string; count: number }>;
     stageTimings: Array<{ stage: string; seconds: number; eventCount: number }>;
   };
+  scpCaches: ScpCacheEntry[];
   usage: {
     openAiCostTodayUsd: number | null;
     ebayCallsToday: number;
     scpCallsToday: number;
     openAiCallsToday: number;
     ximilarCallsToday: number;
+    providerLimits: ProviderLimitStatus[];
   };
 };
