@@ -7,14 +7,11 @@ const BLOCK_WORDS = [
   'case break',
   'box',
   'blaster',
-  'mega box',
   'hanger',
   'fat pack',
   'pack',
   'repack',
   'team set',
-  'complete set',
-  'bundle',
   'mystery',
   'custom',
   'reprint',
@@ -24,12 +21,9 @@ const BLOCK_WORDS = [
   'sticker',
   'magazine',
   'wax',
-  'choose your card',
-  'pick your card',
 ];
 
-const GRADED_WORDS = ['psa', 'bgs', 'sgc', 'cgc', 'beckett', 'gem mint', 'slab', 'hga', 'csg'];
-const MULTI_CARD_WORDS = ['lot of', 'pair', 'x2', 'x3', 'two card', 'three card', 'multi card'];
+const GRADED_WORDS = ['psa', 'bgs', 'sgc', 'cgc', 'beckett', 'gem mint', 'slab'];
 
 export function shouldRejectTitle(title: string, filters: SearchForm): string | null {
   const lower = title.toLowerCase();
@@ -40,17 +34,11 @@ export function shouldRejectTitle(title: string, filters: SearchForm): string | 
     }
   }
 
-  for (const word of MULTI_CARD_WORDS) {
-    if (lower.includes(word)) {
-      return `Rejected multi-card listing: ${word}`;
-    }
-  }
-
-  if (/(1\/1|one of one)/i.test(title)) {
+  if (/(\b1\/1\b|one of one)/i.test(title)) {
     return 'Rejected 1/1 listing';
   }
 
-  const serialMatch = title.match(/\/(\d{1,4})/);
+  const serialMatch = title.match(/\/(\d{1,4})\b/);
   if (serialMatch) {
     const serial = Number(serialMatch[1]);
     if (serial > 0 && serial <= 10) {
@@ -111,15 +99,10 @@ export function buildNegativeClauses(filters: SearchForm): string[] {
     'custom',
     'digital',
     '1/1',
-    'comic',
-    'pokemon',
-    'magazine',
-    'pick your card',
-    'choose your card',
   ];
 
   if (filters.conditionMode === 'raw') {
-    negatives.push('PSA', 'BGS', 'SGC', 'CGC', 'CSG', 'HGA', 'graded', 'slab');
+    negatives.push('PSA', 'BGS', 'SGC', 'CGC', 'graded', 'slab');
   }
 
   return negatives;

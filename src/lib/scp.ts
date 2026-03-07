@@ -1,5 +1,5 @@
 import { getRequiredEnv } from '@/lib/env';
-import { parseMoney, sleep, slugify } from '@/lib/utils';
+import { compactWhitespace, parseMoney, sleep, slugify, tokenizeLoose } from '@/lib/utils';
 
 export type ScpCandidate = {
   productId: string;
@@ -9,139 +9,178 @@ export type ScpCandidate = {
   ungradedSell: number | null;
   grade9: number | null;
   psa10: number | null;
+  source?: 'api' | 'cache';
 };
 
-export type ScpHydrationResult = {
-  candidates: ScpCandidate[];
-  apiCalls: number;
+type ScpProductLookupResponse = {
+  status?: string;
+  products?: Array<Record<string, unknown>>;
+  ['error-message']?: string;
 };
 
-const SCP_MIN_INTERVAL_MS = 1100;
+type ScpSingleProductResponse = Record<string, unknown> & {
+  status?: string;
+  ['error-message']?: string;
+};
+
+const SCP_THROTTLE_MS = 1100;
 let lastScpRequestAt = 0;
+const productCache = new Map<string, ScpCandidate>();
 
 export function scpSetCacheKey(consoleName: string): string {
   return `${slugify(consoleName)}.csv`;
 }
 
-export async function searchSportsCardsProCandidates(query: string): Promise<ScpCandidate[]> {
-  const body = await fetchScpJson('/api/products', { q: query });
-  const rows = Array.isArray(body.products) ? body.products : Array.isArray(body) ? body : [];
-  return rows.slice(0, 20).map((row) => mapScpRow(asRecord(row)));
+function getScpBaseUrl(): string {
+  return process.env.SPORTSCARDSPRO_API_BASE_URL ?? 'https://www.sportscardspro.com';
 }
 
-export async function getSportsCardsProProductById(productId: string): Promise<ScpCandidate | null> {
-  if (!productId) return null;
-  const body = await fetchScpJson('/api/product', { id: productId });
-  if (!body || typeof body !== 'object') return null;
-  return mapScpRow(asRecord(body));
-}
-
-export async function hydrateSportsCardsProCandidates(candidates: ScpCandidate[], maxCount = 5): Promise<ScpHydrationResult> {
-  if (candidates.length === 0) {
-    return { candidates: [], apiCalls: 0 };
-  }
-
-  const detailById = new Map<string, ScpCandidate>();
-  let apiCalls = 0;
-
-  for (const candidate of candidates.slice(0, maxCount)) {
-    const detailed = await getSportsCardsProProductById(candidate.productId);
-    apiCalls += 1;
-    if (detailed) {
-      detailById.set(candidate.productId, detailed);
-    }
-  }
-
-  return {
-    apiCalls,
-    candidates: candidates.map((candidate) => detailById.get(candidate.productId) ?? candidate),
-  };
-}
-
-export function parseScpCsv(csvText: string): ScpCandidate[] {
-  const lines = csvText.split(/\r?\n/).filter(Boolean);
-  if (lines.length < 2) return [];
-  const headers = splitCsvLine(lines[0]);
-  return lines.slice(1).map((line) => {
-    const values = splitCsvLine(line);
-    const row = Object.fromEntries(headers.map((header, index) => [header, values[index] ?? '']));
-    return mapScpRow(row);
-  });
-}
-
-async function waitForScpSlot(): Promise<void> {
+async function throttleScp(): Promise<void> {
   const now = Date.now();
-  const waitMs = Math.max(0, SCP_MIN_INTERVAL_MS - (now - lastScpRequestAt));
+  const waitMs = Math.max(0, lastScpRequestAt + SCP_THROTTLE_MS - now);
   if (waitMs > 0) {
     await sleep(waitMs);
   }
   lastScpRequestAt = Date.now();
 }
 
-async function fetchScpJson(path: string, params: Record<string, string>): Promise<Record<string, unknown>> {
-  const baseUrl = process.env.SPORTSCARDSPRO_API_BASE_URL ?? 'https://www.sportscardspro.com';
-  const token = getRequiredEnv('SPORTSCARDSPRO_API_TOKEN');
-  await waitForScpSlot();
+export async function searchSportsCardsProCandidates(query: string): Promise<ScpCandidate[]> {
+  const trimmedQuery = compactWhitespace(query);
+  if (!trimmedQuery) return [];
 
-  const url = new URL(path, baseUrl);
-  url.searchParams.set('t', token);
-  for (const [key, value] of Object.entries(params)) {
-    url.searchParams.set(key, value);
-  }
+  await throttleScp();
+  const params = new URLSearchParams({
+    t: getRequiredEnv('SPORTSCARDSPRO_API_TOKEN'),
+    q: trimmedQuery,
+  });
 
-  const response = await fetch(url.toString(), {
+  const response = await fetch(`${getScpBaseUrl()}/api/products?${params.toString()}`, {
     headers: { Accept: 'application/json' },
     cache: 'no-store',
   });
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`SportsCardsPro request failed (${response.status}): ${text}`);
+    throw new Error(`SportsCardsPro lookup failed (${response.status}): ${text}`);
   }
 
-  const body = (await response.json()) as Record<string, unknown>;
-  if (String(body.status ?? 'success').toLowerCase() === 'error') {
-    throw new Error(`SportsCardsPro error: ${String(body.message ?? body.error ?? 'Unknown API error')}`);
+  const body = (await response.json()) as ScpProductLookupResponse;
+  if (body.status === 'error') {
+    throw new Error(`SportsCardsPro lookup error: ${body['error-message'] ?? 'Unknown lookup error'}`);
   }
-  return body;
+
+  return (body.products ?? []).slice(0, 20).map((row) => mapScpRow(row, 'api'));
 }
 
-function mapScpRow(row: Record<string, unknown>): ScpCandidate {
+export async function getSportsCardsProProduct(productId: string): Promise<ScpCandidate | null> {
+  if (!productId) return null;
+  const cached = productCache.get(productId);
+  if (cached) return cached;
+
+  await throttleScp();
+  const params = new URLSearchParams({
+    t: getRequiredEnv('SPORTSCARDSPRO_API_TOKEN'),
+    id: productId,
+  });
+
+  const response = await fetch(`${getScpBaseUrl()}/api/product?${params.toString()}`, {
+    headers: { Accept: 'application/json' },
+    cache: 'no-store',
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`SportsCardsPro product lookup failed (${response.status}): ${text}`);
+  }
+
+  const body = (await response.json()) as ScpSingleProductResponse;
+  if (body.status === 'error') {
+    return null;
+  }
+
+  const mapped = mapScpRow(body, 'api');
+  productCache.set(productId, mapped);
+  return mapped;
+}
+
+export async function hydrateSportsCardsProCandidates(productIds: string[]): Promise<ScpCandidate[]> {
+  const seen = new Set<string>();
+  const hydrated: ScpCandidate[] = [];
+  for (const productId of productIds) {
+    if (!productId || seen.has(productId)) continue;
+    seen.add(productId);
+    const row = await getSportsCardsProProduct(productId);
+    if (row) hydrated.push(row);
+  }
+  return hydrated;
+}
+
+export function searchScpCsvCandidates(csvText: string, query: string, limit = 12): ScpCandidate[] {
+  const rows = parseScpCsv(csvText);
+  const ranked = [...rows].sort((a, b) => scoreScpText(query, b) - scoreScpText(query, a));
+  return ranked.slice(0, limit);
+}
+
+export function parseScpCsv(csvText: string): ScpCandidate[] {
+  const lines = csvText.split(/\r?\n/).filter(Boolean);
+  if (lines.length < 2) return [];
+  const headers = splitCsvLine(lines[0]);
+  return lines
+    .slice(1)
+    .map((line) => {
+      const values = splitCsvLine(line);
+      const row = Object.fromEntries(headers.map((header, index) => [header, values[index] ?? '']));
+      return mapScpRow(row, 'cache');
+    })
+    .filter((row) => Boolean(row.productId));
+}
+
+function mapScpRow(row: Record<string, unknown>, source: 'api' | 'cache'): ScpCandidate {
   const productId = String(row.id ?? row['product-id'] ?? '');
   const productName = String(row['product-name'] ?? row.name ?? 'Unknown Product');
   const consoleName = row['console-name'] ? String(row['console-name']) : null;
-  const productUrl = buildScpProductUrl(consoleName, productName);
+  const productUrl = productId && consoleName ? `https://www.sportscardspro.com/game/${slugify(consoleName)}/${slugify(productName)}` : null;
   return {
     productId,
     productName,
     consoleName,
     productUrl,
-    ungradedSell: parseScpPrice(row['retail-loose-sell']),
-    grade9: parseScpPrice(row['graded-price']),
-    psa10: parseScpPrice(row['manual-only-price']),
+    ungradedSell: penniesOrMoney(row['retail-loose-sell']),
+    grade9: penniesOrMoney(row['graded-price']),
+    psa10: penniesOrMoney(row['manual-only-price']),
+    source,
   };
 }
 
-function buildScpProductUrl(consoleName: string | null, productName: string | null): string | null {
-  if (!consoleName || !productName) return null;
-  return `https://www.sportscardspro.com/game/${slugify(consoleName)}/${slugify(productName.replace(/#/g, ' '))}`;
-}
-
-function parseScpPrice(value: unknown): number | null {
-  if (value === null || value === undefined || value === '') return null;
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value / 100 : null;
+function penniesOrMoney(input: unknown): number | null {
+  if (typeof input === 'number') {
+    if (!Number.isFinite(input)) return null;
+    return input > 1000 ? Number((input / 100).toFixed(2)) : input;
   }
-  if (typeof value !== 'string') return null;
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  if (trimmed.includes('$') || trimmed.includes('.') || trimmed.includes(',')) {
+  if (typeof input === 'string') {
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+    if (/^\d+$/.test(trimmed) && trimmed.length >= 3) {
+      return Number((Number(trimmed) / 100).toFixed(2));
+    }
     return parseMoney(trimmed);
   }
-  if (/^-?\d+$/.test(trimmed)) {
-    return Number(trimmed) / 100;
+  return null;
+}
+
+function scoreScpText(query: string, candidate: ScpCandidate): number {
+  const haystack = `${candidate.productName} ${candidate.consoleName ?? ''}`.toLowerCase();
+  const queryTokens = tokenizeLoose(query);
+  let score = 0;
+  for (const token of queryTokens) {
+    if (token.length <= 1) continue;
+    if (haystack.includes(token)) score += token.startsWith('#') ? 16 : 4;
   }
-  return parseMoney(trimmed);
+  const titleNumber = query.match(/#([a-z0-9-]+)/i)?.[0]?.toLowerCase();
+  if (titleNumber && haystack.includes(titleNumber)) score += 14;
+  if (/\[[^\]]+\]/.test(candidate.productName)) score += 2;
+  if (candidate.ungradedSell !== null) score += 1;
+  return score;
 }
 
 function splitCsvLine(line: string): string[] {
@@ -167,8 +206,4 @@ function splitCsvLine(line: string): string[] {
   }
   values.push(current);
   return values;
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 }

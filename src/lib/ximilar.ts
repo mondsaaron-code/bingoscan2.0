@@ -1,54 +1,58 @@
 import { getRequiredEnv } from '@/lib/env';
+import { compactWhitespace, tokenizeLoose } from '@/lib/utils';
 
 export type XimilarCardHints = {
   titleHints: string[];
   detectedText: string[];
   confidence: number | null;
+  callCount: number;
 };
 
-const IDENTIFY_ENDPOINT = 'https://api.ximilar.com/collectibles/v2/sport_id';
-const OCR_ENDPOINT = 'https://api.ximilar.com/collectibles/v2/card_ocr_id';
-
 export async function identifyWithXimilar(imageUrls: string[]): Promise<XimilarCardHints | null> {
-  if (!process.env.XIMILAR_API_KEY || imageUrls.length === 0) {
+  const apiKey = process.env.XIMILAR_API_KEY;
+  const urls = imageUrls.filter(Boolean).slice(0, 2);
+  if (!apiKey || urls.length === 0) {
     return null;
   }
 
-  const [identifyResult, ocrResult] = await Promise.allSettled([
-    callXimilar(IDENTIFY_ENDPOINT, imageUrls),
-    callXimilar(OCR_ENDPOINT, imageUrls),
+  const [sportBody, ocrBody] = await Promise.all([
+    postToXimilar('/collectibles/v2/sport_id', { records: urls.map((url) => ({ _url: url })), magic_ai: true }),
+    postToXimilar('/collectibles/v2/card_ocr_id', { records: urls.map((url) => ({ _url: url })) }),
   ]);
 
-  const hintBucket = new Set<string>();
-  const textBucket = new Set<string>();
+  const strings = new Set<string>();
   const confidences: number[] = [];
+  collectStrings(sportBody, strings, confidences);
+  collectStrings(ocrBody, strings, confidences);
 
-  for (const result of [identifyResult, ocrResult]) {
-    if (result.status !== 'fulfilled') continue;
-    collectStrings(result.value, hintBucket, textBucket, confidences);
-  }
+  const detectedText = [...strings]
+    .map((value) => compactWhitespace(value))
+    .filter(Boolean)
+    .filter((value, index, arr) => arr.indexOf(value) === index)
+    .slice(0, 40);
 
-  if (hintBucket.size === 0 && textBucket.size === 0) {
-    return null;
-  }
+  const titleHints = detectedText
+    .flatMap((value) => tokenizeLoose(value))
+    .filter((token) => token.length > 1)
+    .filter((token, index, arr) => arr.indexOf(token) === index)
+    .slice(0, 20);
 
   return {
-    titleHints: [...hintBucket].slice(0, 12),
-    detectedText: [...textBucket].slice(0, 40),
+    titleHints,
+    detectedText,
     confidence: confidences.length > 0 ? Math.max(...confidences) : null,
+    callCount: 2,
   };
 }
 
-async function callXimilar(endpoint: string, imageUrls: string[]): Promise<Record<string, unknown>> {
-  const response = await fetch(endpoint, {
+async function postToXimilar(path: string, payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const response = await fetch(`https://api.ximilar.com${path}`, {
     method: 'POST',
     headers: {
       Authorization: `Token ${getRequiredEnv('XIMILAR_API_KEY')}`,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({
-      records: imageUrls.map((url) => ({ _url: url })),
-    }),
+    body: JSON.stringify(payload),
     cache: 'no-store',
   });
 
@@ -60,65 +64,33 @@ async function callXimilar(endpoint: string, imageUrls: string[]): Promise<Recor
   return (await response.json()) as Record<string, unknown>;
 }
 
-function collectStrings(
-  value: unknown,
-  hintBucket: Set<string>,
-  textBucket: Set<string>,
-  confidences: number[],
-  path: string[] = [],
-): void {
+function collectStrings(value: unknown, sink: Set<string>, confidences: number[]): void {
   if (value === null || value === undefined) return;
 
-  if (typeof value === 'number') {
-    if (path[path.length - 1] === 'prob' || path[path.length - 1] === 'confidence') {
-      confidences.push(value);
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.length >= 2 && trimmed.length <= 120) {
+      sink.add(trimmed);
     }
     return;
   }
 
-  if (typeof value === 'string') {
-    const trimmed = value.trim();
-    if (!trimmed || /^https?:\/\//i.test(trimmed)) return;
-    if (trimmed.length > 80) return;
-    if (/[a-z0-9]/i.test(trimmed)) {
-      textBucket.add(trimmed);
-      if (shouldUseAsHint(path[path.length - 1] ?? '')) {
-        hintBucket.add(trimmed);
-      }
-    }
+  if (typeof value === 'number') {
+    if (value >= 0 && value <= 1) confidences.push(value);
     return;
   }
 
   if (Array.isArray(value)) {
-    for (const item of value) {
-      collectStrings(item, hintBucket, textBucket, confidences, path);
-    }
+    for (const item of value) collectStrings(item, sink, confidences);
     return;
   }
 
   if (typeof value === 'object') {
-    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
-      collectStrings(child, hintBucket, textBucket, confidences, [...path, key]);
+    for (const [key, nested] of Object.entries(value)) {
+      if (key.toLowerCase().includes('confidence') && typeof nested === 'number') {
+        confidences.push(nested);
+      }
+      collectStrings(nested, sink, confidences);
     }
   }
-}
-
-function shouldUseAsHint(key: string): boolean {
-  return [
-    'name',
-    'title',
-    'player',
-    'athlete',
-    'year',
-    'set',
-    'series',
-    'subset',
-    'parallel',
-    'variant',
-    'brand',
-    'card_number',
-    'number',
-    'ocr_text',
-    'text',
-  ].includes(key);
 }

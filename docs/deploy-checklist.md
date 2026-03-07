@@ -29,10 +29,24 @@ Push as a fresh repo.
 
 Import repo.
 Set env vars.
-Make sure the **Framework Preset** is **Next.js**.
 Leave **Output Directory** blank.
 Deploy.
 
 ## First login
 
 Use the email/password you created in Supabase Auth.
+
+## Notes on SportsCardsPro set cache
+
+The app now supports reading set CSV files from the Supabase Storage bucket `scp-csv-cache` when a matching set file already exists. The expected storage path is:
+
+- `sets/<slugified-console-name>.csv`
+
+Examples:
+
+- `sets/football-cards-2025-panini-donruss.csv`
+- `sets/basketball-cards-2024-panini-prizm.csv`
+
+When a cached file exists, the scan engine will merge those rows into the normal SCP API candidate pool before OpenAI verification.
+
+Manual review picks now save a reusable override automatically, so when you correct a match once, future near-identical titles can auto-apply that product without sending the row back to review.

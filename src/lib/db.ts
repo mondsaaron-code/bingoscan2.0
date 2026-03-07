@@ -1,6 +1,6 @@
 import { createSupabaseAdminClient } from '@/lib/supabase';
-import { safeJsonParse, titleFingerprint } from '@/lib/utils';
 import { getOpenAiTodayCostUsd } from '@/lib/openai-admin';
+import { normalizeTitleFingerprint, safeJsonParse, slugify } from '@/lib/utils';
 import type {
   DashboardSnapshot,
   Disposition,
@@ -91,20 +91,15 @@ export async function addScanEvent(
   if (error) throw error;
 
   if (level !== 'info') {
-    const countField = level === 'warning' ? 'warning_count' : 'error_count';
-    const { data: scanRow, error: scanError } = await supabase
-      .from('scans')
-      .select('warning_count, error_count')
-      .eq('id', scanId)
-      .single();
+    const { data: scanRow, error: scanError } = await supabase.from('scans').select('warning_count, error_count').eq('id', scanId).single();
     if (scanError) throw scanError;
 
-    const patch: { warning_count: number; error_count: number } = {
+    const patch = {
       warning_count: Number(scanRow.warning_count ?? 0),
       error_count: Number(scanRow.error_count ?? 0),
     };
-    if (countField === 'warning_count') patch.warning_count += 1;
-    if (countField === 'error_count') patch.error_count += 1;
+    if (level === 'warning') patch.warning_count += 1;
+    if (level === 'error') patch.error_count += 1;
 
     const { error: updateError } = await supabase.from('scans').update(patch).eq('id', scanId);
     if (updateError) throw updateError;
@@ -167,11 +162,10 @@ export async function setDisposition(resultIds: string[], disposition: Dispositi
 
 export async function resolveReview(resultId: string, optionId: string): Promise<void> {
   const supabase = getSupabase();
-  const [{ data: option, error: optionError }, { data: result, error: resultError }] = await Promise.all([
+  const [{ data: option, error: optionError }, { data: resultRow, error: resultError }] = await Promise.all([
     supabase.from('scan_review_options').select('*').eq('id', optionId).single(),
     supabase.from('scan_results').select('ebay_title').eq('id', resultId).single(),
   ]);
-
   if (optionError) throw optionError;
   if (resultError) throw resultError;
 
@@ -189,11 +183,15 @@ export async function resolveReview(resultId: string, optionId: string): Promise
     .eq('id', resultId);
   if (updateError) throw updateError;
 
-  await saveManualMatchOverride(String(result.ebay_title), String(option.scp_product_id), String(option.scp_product_name));
+  if (resultRow?.ebay_title) {
+    await saveManualMatchOverride(String(resultRow.ebay_title), String(option.scp_product_id), String(option.scp_product_name));
+  }
 }
 
-export async function getManualMatchOverride(ebayTitle: string): Promise<{ scpProductId: string; scpProductName: string } | null> {
-  const fingerprint = titleFingerprint(ebayTitle);
+export async function getManualMatchOverride(
+  ebayTitle: string,
+): Promise<{ scpProductId: string; scpProductName: string } | null> {
+  const fingerprint = normalizeTitleFingerprint(ebayTitle);
   const { data, error } = await getSupabase()
     .from('manual_match_overrides')
     .select('scp_product_id, scp_product_name')
@@ -210,16 +208,53 @@ export async function getManualMatchOverride(ebayTitle: string): Promise<{ scpPr
 }
 
 export async function saveManualMatchOverride(ebayTitle: string, scpProductId: string, scpProductName: string): Promise<void> {
+  const fingerprint = normalizeTitleFingerprint(ebayTitle);
   const supabase = getSupabase();
-  const fingerprint = titleFingerprint(ebayTitle);
   const { error: deleteError } = await supabase.from('manual_match_overrides').delete().eq('ebay_title_fingerprint', fingerprint);
   if (deleteError) throw deleteError;
-  const { error } = await supabase.from('manual_match_overrides').insert({
+
+  const { error: insertError } = await supabase.from('manual_match_overrides').insert({
     ebay_title_fingerprint: fingerprint,
     scp_product_id: scpProductId,
     scp_product_name: scpProductName,
   });
-  if (error) throw error;
+  if (insertError) throw insertError;
+}
+
+export async function getScpCacheCsvText(consoleName: string): Promise<string | null> {
+  const cacheKey = `${slugify(consoleName)}.csv`;
+  const { data: indexRow, error: indexError } = await getSupabase()
+    .from('scp_set_cache_index')
+    .select('storage_path')
+    .eq('cache_key', cacheKey)
+    .maybeSingle();
+  if (indexError) throw indexError;
+  if (!indexRow?.storage_path) return null;
+
+  const { data, error } = await getSupabase().storage.from('scp-csv-cache').download(String(indexRow.storage_path));
+  if (error || !data) return null;
+  return await data.text();
+}
+
+export async function upsertScpCacheCsv(consoleName: string, csvText: string, sourceConsoleUrl?: string | null): Promise<string> {
+  const cacheKey = `${slugify(consoleName)}.csv`;
+  const storagePath = `sets/${cacheKey}`;
+  const { error: uploadError } = await getSupabase().storage.from('scp-csv-cache').upload(storagePath, csvText, {
+    upsert: true,
+    contentType: 'text/csv; charset=utf-8',
+  });
+  if (uploadError) throw uploadError;
+
+  const { error: indexError } = await getSupabase().from('scp_set_cache_index').upsert({
+    cache_key: cacheKey,
+    console_name: consoleName,
+    source_console_url: sourceConsoleUrl ?? null,
+    storage_path: storagePath,
+    downloaded_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  });
+  if (indexError) throw indexError;
+  return storagePath;
 }
 
 export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {

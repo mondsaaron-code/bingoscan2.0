@@ -66,25 +66,30 @@ export function slugify(value: string): string {
     .slice(0, 120);
 }
 
+export function compactWhitespace(value: string): string {
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+export function tokenizeLoose(value: string): string[] {
+  return compactWhitespace(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9#/\[\]\- ]+/g, ' ')
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
+export function normalizeTitleFingerprint(value: string): string {
+  const stopWords = new Set(['the', 'and', 'with', 'for', 'card', 'sports', 'trading']);
+  return tokenizeLoose(value)
+    .filter((token) => !stopWords.has(token))
+    .slice(0, 18)
+    .join(' ');
+}
+
 export function parseMoney(input: string | number | null | undefined): number | null {
   if (input === null || input === undefined || input === '') return null;
   if (typeof input === 'number') return Number.isFinite(input) ? input : null;
   const cleaned = input.replace(/[$,]/g, '').trim();
   const parsed = Number(cleaned);
   return Number.isFinite(parsed) ? parsed : null;
-}
-
-export function normalizeLooseText(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9#\/ ]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-export function titleFingerprint(value: string): string {
-  return normalizeLooseText(value)
-    .replace(/(?:ebay|sportscardspro|card|cards)/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
 }

@@ -2,7 +2,6 @@ import OpenAI from 'openai';
 import type { ResponseInputContent, ResponseInputItem } from 'openai/resources/responses/responses';
 import type { ScpCandidate } from '@/lib/scp';
 import type { EbayListing } from '@/lib/ebay';
-import type { XimilarCardHints } from '@/lib/ximilar';
 import { getRequiredEnv } from '@/lib/env';
 
 function getOpenAiClient() {
@@ -21,24 +20,17 @@ export type MatchDecision = {
 export async function verifyCardMatchWithOpenAI(
   listing: EbayListing,
   candidates: ScpCandidate[],
-  ximilarHints?: XimilarCardHints | null,
+  options?: { ximilarHints?: string[] | null },
 ): Promise<MatchDecision> {
-  const input = {
+  const inputPayload = {
     listing: {
       title: listing.title,
       url: listing.itemWebUrl,
       condition: listing.condition,
-      purchasePrice: listing.price,
-      shippingPrice: listing.shipping,
-      totalPurchasePrice: listing.total,
+      imageUrl: listing.imageUrl,
+      purchaseTotal: listing.total,
     },
-    ximilarHints: ximilarHints
-      ? {
-          titleHints: ximilarHints.titleHints,
-          detectedText: ximilarHints.detectedText.slice(0, 20),
-          confidence: ximilarHints.confidence,
-        }
-      : null,
+    ximilarHints: options?.ximilarHints ?? [],
     candidates: candidates.map((candidate) => ({
       productId: candidate.productId,
       productName: candidate.productName,
@@ -52,7 +44,7 @@ export async function verifyCardMatchWithOpenAI(
   const userContent: ResponseInputContent[] = [
     {
       type: 'input_text',
-      text: JSON.stringify(input),
+      text: JSON.stringify(inputPayload),
     },
   ];
 
@@ -71,7 +63,7 @@ export async function verifyCardMatchWithOpenAI(
         {
           type: 'input_text',
           text:
-            'You match sports card eBay listings to the exact SportsCardsPro card record. Be conservative. Only return exactMatch=true when you are highly confident in the exact set, player, parallel, insert, numbering, autograph or relic status, and card number. Use the image if provided. If uncertain, choose exactMatch=false, provide the top three candidate product IDs, and explain the ambiguity. Return JSON only.',
+            'You match sports card eBay listings to the exact SportsCardsPro card record. Be conservative. Only return exactMatch true when you are highly confident in exact set, player, parallel, insert, numbering, autograph or relic status, grading context, and card number. Use the image when available. Return JSON only.',
         },
       ],
     },
@@ -84,7 +76,6 @@ export async function verifyCardMatchWithOpenAI(
   const response = await getOpenAiClient().responses.create({
     model: 'gpt-5-mini',
     input: inputItems,
-    max_output_tokens: 500,
     text: {
       format: {
         type: 'json_schema',
@@ -114,10 +105,5 @@ export async function verifyCardMatchWithOpenAI(
     },
   });
 
-  const text = response.output_text?.trim();
-  if (!text) {
-    throw new Error('OpenAI returned an empty match response');
-  }
-
-  return JSON.parse(text) as MatchDecision;
+  return JSON.parse(response.output_text) as MatchDecision;
 }

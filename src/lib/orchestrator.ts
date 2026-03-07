@@ -4,6 +4,7 @@ import {
   appendMetrics,
   getManualMatchOverride,
   getScanById,
+  getScpCacheCsvText,
   incrementUsage,
   insertCandidate,
   insertResult,
@@ -13,21 +14,22 @@ import {
   upsertDedupeItem,
 } from '@/lib/db';
 import { shouldRejectTitle } from '@/lib/filters';
-import { verifyCardMatchWithOpenAI, type MatchDecision } from '@/lib/openai';
+import { verifyCardMatchWithOpenAI } from '@/lib/openai';
 import {
-  getSportsCardsProProductById,
+  getSportsCardsProProduct,
   hydrateSportsCardsProCandidates,
+  searchScpCsvCandidates,
   searchSportsCardsProCandidates,
   type ScpCandidate,
 } from '@/lib/scp';
-import { identifyWithXimilar, type XimilarCardHints } from '@/lib/ximilar';
+import { identifyWithXimilar } from '@/lib/ximilar';
+import { compactWhitespace, tokenizeLoose } from '@/lib/utils';
 import type { SearchForm, ScanSummary } from '@/types/app';
-import { normalizeLooseText } from '@/lib/utils';
 
 const TARGET_RESULTS = 10;
 const FETCH_PAGE_SIZE = 40;
-const MAX_CANDIDATES_PER_TICK = 2;
-const SCP_AUTO_MATCH_CONFIDENCE = 90;
+const MAX_CANDIDATES_PER_TICK = 4;
+const AUTO_ACCEPT_CONFIDENCE = 90;
 
 export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   const scan = await getScanById(scanId);
@@ -61,7 +63,6 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   let processed = 0;
   for (const listing of listings) {
     if (processed >= MAX_CANDIDATES_PER_TICK) break;
-
     const dedupeAllowed = await upsertDedupeItem(listing.itemId);
     if (!dedupeAllowed) {
       await appendMetrics(scanId, { candidatesFilteredOut: 1 });
@@ -117,82 +118,96 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
   await updateCandidate(candidateId, { stage: 'matching_scp' });
   await appendMetrics(scanId, { candidatesEvaluated: 1 });
 
-  const ximilarHints = await getXimilarHints(scanId, listing);
+  const override = await getManualMatchOverride(listing.title);
+  if (override) {
+    await addScanEvent(scanId, 'info', 'matching_scp', 'Applied saved manual override', `${listing.title} -> ${override.scpProductName}`);
+  }
 
-  const scpQuery = buildScpQuery(listing, filters, ximilarHints);
-  const basicCandidates = await searchSportsCardsProCandidates(scpQuery);
+  const ximilarHints = shouldUseXimilar(listing.title, listing.imageUrl) ? await identifyWithXimilar([listing.imageUrl!].filter(Boolean)) : null;
+  if (ximilarHints) {
+    await incrementUsage('ximilar', ximilarHints.callCount);
+    await appendMetrics(scanId, { ximilarCalls: ximilarHints.callCount });
+  }
+
+  const scpQuery = buildScpQuery(listing.title, ximilarHints?.titleHints ?? []);
+  const baseCandidates = await searchSportsCardsProCandidates(scpQuery);
   await incrementUsage('scp', 1);
   await appendMetrics(scanId, { scpCalls: 1 });
 
-  if (basicCandidates.length === 0) {
+  if (baseCandidates.length === 0 && !override) {
     await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: 'No SportsCardsPro candidates found' });
     await addScanEvent(scanId, 'warning', 'matching_scp', 'No SCP candidates found', listing.title);
     return;
   }
 
-  const rankedBaseCandidates = rankScpCandidatesLocally(listing.title, basicCandidates, ximilarHints).slice(0, 6);
-  const hydration = await hydrateSportsCardsProCandidates(rankedBaseCandidates, 5);
-  if (hydration.apiCalls > 0) {
-    await incrementUsage('scp', hydration.apiCalls);
-    await appendMetrics(scanId, { scpCalls: hydration.apiCalls });
+  let candidatePool = [...baseCandidates];
+  const hydratedBase = await hydrateSportsCardsProCandidates(rankScpCandidatesLocally(listing.title, baseCandidates).slice(0, 5).map((row) => row.productId));
+  if (hydratedBase.length > 0) {
+    await incrementUsage('scp', hydratedBase.length);
+    await appendMetrics(scanId, { scpCalls: hydratedBase.length });
+    candidatePool = mergeCandidates(candidatePool, hydratedBase);
   }
 
-  let rankedCandidates = rankScpCandidatesLocally(listing.title, hydration.candidates, ximilarHints).slice(0, 5);
-
-  const manualOverride = await getManualMatchOverride(listing.title);
-  if (manualOverride) {
-    let overrideCandidate = rankedCandidates.find((candidate) => candidate.productId === manualOverride.scpProductId) ?? null;
-    let extraCalls = 0;
-    if (!overrideCandidate) {
-      overrideCandidate = await getSportsCardsProProductById(manualOverride.scpProductId);
-      extraCalls = 1;
+  const likelyConsole = hydratedBase[0]?.consoleName ?? candidatePool[0]?.consoleName ?? null;
+  if (likelyConsole) {
+    const cachedCsv = await getScpCacheCsvText(likelyConsole);
+    if (cachedCsv) {
+      const cacheCandidates = searchScpCsvCandidates(cachedCsv, scpQuery, 12);
+      candidatePool = mergeCandidates(candidatePool, cacheCandidates);
+      await addScanEvent(scanId, 'info', 'matching_scp', 'Loaded SCP set cache', likelyConsole);
     }
+  }
 
-    if (extraCalls > 0) {
-      await incrementUsage('scp', extraCalls);
-      await appendMetrics(scanId, { scpCalls: extraCalls });
-    }
-
+  if (override) {
+    const overrideCandidate = candidatePool.find((row) => row.productId === override.scpProductId) ?? (await getSportsCardsProProduct(override.scpProductId));
     if (overrideCandidate) {
-      rankedCandidates = [overrideCandidate, ...rankedCandidates.filter((candidate) => candidate.productId !== overrideCandidate.productId)].slice(0, 5);
-      const overrideDecision: MatchDecision = {
-        exactMatch: true,
-        confidence: 99,
-        reasoning: `Applied manual override for matching fingerprint: ${manualOverride.scpProductName}`,
-        chosenProductId: overrideCandidate.productId,
-        topThreeProductIds: rankedCandidates.slice(0, 3).map((candidate) => candidate.productId),
-        extractedAttributes: {},
-      };
-      await finalizeDecision(scanId, candidateId, listing, filters, rankedCandidates, overrideDecision, true);
-      return;
+      if (!candidatePool.some((row) => row.productId === overrideCandidate.productId)) {
+        candidatePool = mergeCandidates(candidatePool, [overrideCandidate]);
+      }
+      const estimatedProfit = (overrideCandidate.ungradedSell ?? 0) - listing.total;
+      const estimatedMarginPct = overrideCandidate.ungradedSell ? (estimatedProfit / listing.total) * 100 : null;
+      if (passesThresholds(filters, estimatedProfit, estimatedMarginPct)) {
+        await insertResultPayload(
+          scanId,
+          listing,
+          overrideCandidate,
+          {
+            exactMatch: true,
+            confidence: 99,
+            reasoning: 'Used saved manual override for a previously reviewed listing pattern.',
+            chosenProductId: overrideCandidate.productId,
+            topThreeProductIds: [overrideCandidate.productId],
+            extractedAttributes: {},
+          },
+          false,
+          estimatedProfit,
+          estimatedMarginPct,
+        );
+        await appendMetrics(scanId, { dealsFound: 1 });
+        await updateCandidate(candidateId, {
+          stage: 'accepted',
+          ai_confidence: 99,
+          ai_reasoning: 'Used saved manual override',
+          scp_product_id: overrideCandidate.productId,
+        });
+        return;
+      }
     }
   }
 
   await markScanStatus(scanId, 'ai_verifying', 'Verifying exact match with OpenAI');
-  const decision = await verifyCardMatchWithOpenAI(listing, rankedCandidates, ximilarHints);
+  const rankedCandidates = rankScpCandidatesLocally(listing.title, candidatePool).slice(0, 5);
+  const decision = await verifyCardMatchWithOpenAI(listing, rankedCandidates, { ximilarHints: ximilarHints?.titleHints ?? [] });
   await incrementUsage('openai', 1);
   await appendMetrics(scanId, { openaiCalls: 1 });
 
-  await finalizeDecision(scanId, candidateId, listing, filters, rankedCandidates, decision, false);
-}
-
-async function finalizeDecision(
-  scanId: string,
-  candidateId: string,
-  listing: EbayListing,
-  filters: SearchForm,
-  rankedCandidates: ScpCandidate[],
-  decision: Pick<MatchDecision, 'exactMatch' | 'confidence' | 'reasoning' | 'chosenProductId' | 'topThreeProductIds'>,
-  cameFromOverride: boolean,
-): Promise<void> {
   const chosen = rankedCandidates.find((candidate) => candidate.productId === decision.chosenProductId) ?? rankedCandidates[0] ?? null;
 
-  if (!decision.exactMatch || decision.confidence < SCP_AUTO_MATCH_CONFIDENCE || !chosen) {
-    const topThree = selectTopThreeCandidates(rankedCandidates, decision.topThreeProductIds);
+  if (!decision.exactMatch || decision.confidence < AUTO_ACCEPT_CONFIDENCE || !chosen) {
     const resultId = await insertResultPayload(scanId, listing, null, decision, true);
     await insertReviewOptions(
       resultId,
-      topThree.map((candidate, index) => reviewOptionPayload(candidate, index + 1, decision.confidence)),
+      rankedCandidates.slice(0, 3).map((candidate, index) => reviewOptionPayload(candidate, index + 1, decision.confidence)),
     );
     await appendMetrics(scanId, { needsReview: 1 });
     await updateCandidate(candidateId, { stage: 'needs_review', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning });
@@ -200,63 +215,28 @@ async function finalizeDecision(
     return;
   }
 
-  if (chosen.ungradedSell === null) {
-    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: 'Matched SCP card has no ungraded sell price' });
-    await addScanEvent(scanId, 'warning', 'matching_scp', 'Matched SCP card had no ungraded sell price', chosen.productName);
-    return;
-  }
+  const estimatedProfit = (chosen.ungradedSell ?? 0) - listing.total;
+  const estimatedMarginPct = chosen.ungradedSell ? (estimatedProfit / listing.total) * 100 : null;
 
-  const estimatedProfit = chosen.ungradedSell - listing.total;
-  const estimatedMarginPct = listing.total > 0 ? (estimatedProfit / listing.total) * 100 : null;
-
-  if (filters.minProfit && estimatedProfit < filters.minProfit) {
-    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: `Profit below threshold: ${estimatedProfit.toFixed(2)}` });
-    return;
-  }
-  if (filters.minMarginPct && (estimatedMarginPct ?? 0) < filters.minMarginPct) {
-    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: `Margin below threshold: ${(estimatedMarginPct ?? 0).toFixed(2)}%` });
+  if (!passesThresholds(filters, estimatedProfit, estimatedMarginPct)) {
+    const rejectionReason = filters.minProfit && estimatedProfit < filters.minProfit
+      ? `Profit below threshold: ${estimatedProfit.toFixed(2)}`
+      : `Margin below threshold: ${(estimatedMarginPct ?? 0).toFixed(2)}%`;
+    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: rejectionReason });
     return;
   }
 
   await insertResultPayload(scanId, listing, chosen, decision, false, estimatedProfit, estimatedMarginPct);
   await appendMetrics(scanId, { dealsFound: 1 });
-  await updateCandidate(candidateId, {
-    stage: 'accepted',
-    ai_confidence: decision.confidence,
-    ai_reasoning: decision.reasoning,
-    scp_product_id: chosen.productId,
-  });
-  await addScanEvent(
-    scanId,
-    'info',
-    cameFromOverride ? 'manual_override' : 'publishing_results',
-    'Added deal result',
-    `${listing.title}\nConfidence ${decision.confidence}`,
-  );
-}
-
-async function getXimilarHints(scanId: string, listing: EbayListing): Promise<XimilarCardHints | null> {
-  if (!shouldUseXimilar(listing.title, listing.imageUrl)) return null;
-  try {
-    const hints = await identifyWithXimilar([listing.imageUrl!].filter(Boolean));
-    if (hints) {
-      await incrementUsage('ximilar', 1);
-      await appendMetrics(scanId, { ximilarCalls: 1 });
-      await addScanEvent(scanId, 'info', 'matching_scp', 'Used Ximilar assist', hints.titleHints.slice(0, 5).join(' | '));
-    }
-    return hints;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Ximilar identification failed';
-    await addScanEvent(scanId, 'warning', 'matching_scp', 'Ximilar assist failed; continuing without it', message);
-    return null;
-  }
+  await updateCandidate(candidateId, { stage: 'accepted', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning, scp_product_id: chosen.productId });
+  await addScanEvent(scanId, 'info', 'publishing_results', 'Added deal result', `${listing.title}\nConfidence ${decision.confidence}`);
 }
 
 async function insertResultPayload(
   scanId: string,
   listing: EbayListing,
   candidate: ScpCandidate | null,
-  decision: { confidence: number; reasoning: string },
+  decision: Awaited<ReturnType<typeof verifyCardMatchWithOpenAI>>,
   needsReview: boolean,
   estimatedProfit?: number | null,
   estimatedMarginPct?: number | null,
@@ -301,75 +281,72 @@ function reviewOptionPayload(candidate: ScpCandidate, rank: number, confidence: 
 function shouldUseXimilar(title: string, imageUrl: string | null): boolean {
   if (!imageUrl) return false;
   const lower = title.toLowerCase();
-  return !/#[a-z0-9]+/.test(lower) || lower.includes('prizm') || lower.includes('mosaic') || lower.includes('optic');
+  return !/#[a-z0-9]+/.test(lower) || lower.includes('prizm') || lower.includes('mosaic') || lower.includes('optic') || lower.includes('refractor');
 }
 
-function buildScpQuery(listing: EbayListing, filters: SearchForm, hints: XimilarCardHints | null): string {
-  const seeds = [
-    listing.title,
-    filters.sport,
-    filters.brand,
-    filters.variant,
-    filters.insert,
-    filters.cardNumber ? `#${filters.cardNumber}` : null,
-    filters.playerName,
-    filters.team,
-    filters.startYear ? String(filters.startYear) : null,
-    filters.endYear && filters.endYear !== filters.startYear ? String(filters.endYear) : null,
-    ...(hints?.titleHints ?? []),
-  ]
-    .filter(Boolean)
-    .join(' ');
-
-  const tokens = normalizeLooseText(seeds)
-    .split(/\s+/)
-    .filter(Boolean)
+function buildScpQuery(title: string, hints: string[]): string {
+  const tokens = tokenizeLoose(`${title} ${hints.join(' ')}`)
     .filter((token) => token.length > 1)
     .slice(0, 16);
-  return tokens.join(' ');
+  return compactWhitespace(tokens.join(' '));
 }
 
-function rankScpCandidatesLocally(title: string, candidates: ScpCandidate[], hints: XimilarCardHints | null): ScpCandidate[] {
-  const lower = normalizeLooseText(title);
-  const hintText = normalizeLooseText((hints?.titleHints ?? []).join(' '));
-  return [...candidates].sort((a, b) => scoreCandidate(lower, hintText, b) - scoreCandidate(lower, hintText, a));
+function rankScpCandidatesLocally(title: string, candidates: ScpCandidate[]): ScpCandidate[] {
+  const lower = title.toLowerCase();
+  return [...candidates].sort((a, b) => scoreCandidate(lower, b) - scoreCandidate(lower, a));
 }
 
-function scoreCandidate(title: string, hintText: string, candidate: ScpCandidate): number {
-  const product = normalizeLooseText(candidate.productName);
-  const consoleName = normalizeLooseText(candidate.consoleName ?? '');
+function scoreCandidate(title: string, candidate: ScpCandidate): number {
+  const haystack = `${candidate.productName} ${candidate.consoleName ?? ''}`.toLowerCase();
   let score = 0;
 
-  for (const token of product.split(/\s+/)) {
-    if (token.length > 2 && title.includes(token)) score += 4;
-    if (token.length > 2 && hintText.includes(token)) score += 2;
+  for (const token of tokenizeLoose(candidate.productName)) {
+    if (token.length > 2 && title.includes(token)) score += 3;
+    if (token.startsWith('#') && title.includes(token)) score += 12;
   }
 
-  for (const token of consoleName.split(/\s+/)) {
-    if (token.length > 3 && title.includes(token)) score += 2;
+  const numberMatch = candidate.productName.match(/#([a-z0-9-]+)/i);
+  if (numberMatch && title.includes(`#${numberMatch[1].toLowerCase()}`)) score += 16;
+
+  const bracketMatch = candidate.productName.match(/\[[^\]]+\]/g) ?? [];
+  for (const variant of bracketMatch) {
+    if (title.includes(variant.toLowerCase().replace(/[\[\]]/g, ''))) score += 10;
   }
 
-  const numberMatch = product.match(/#([a-z0-9-]+)/i);
-  if (numberMatch && title.includes(numberMatch[0].toLowerCase())) score += 14;
-  if (/\[[^\]]+\]/.test(candidate.productName)) score += 3;
-  if (candidate.ungradedSell !== null) score += 2;
-  if (candidate.grade9 !== null || candidate.psa10 !== null) score += 1;
+  if (/\[rc\]|rookie/i.test(candidate.productName) && /rookie|\brc\b/i.test(title)) score += 4;
+  if (/auto|autograph/i.test(candidate.productName) && /auto|autograph/i.test(title)) score += 6;
+  if (/memorabilia|patch|relic/i.test(candidate.productName) && /memorabilia|patch|relic/i.test(title)) score += 6;
+  if (candidate.ungradedSell !== null) score += 1;
+  if (candidate.source === 'cache') score += 1;
+
   return score;
 }
 
-function selectTopThreeCandidates(candidates: ScpCandidate[], preferredIds: string[]): ScpCandidate[] {
-  const ordered: ScpCandidate[] = [];
-  for (const id of preferredIds) {
-    const found = candidates.find((candidate) => candidate.productId === id);
-    if (found && !ordered.some((candidate) => candidate.productId === found.productId)) {
-      ordered.push(found);
+function mergeCandidates(...groups: ScpCandidate[][]): ScpCandidate[] {
+  const byId = new Map<string, ScpCandidate>();
+  for (const group of groups) {
+    for (const candidate of group) {
+      const existing = byId.get(candidate.productId);
+      if (!existing) {
+        byId.set(candidate.productId, candidate);
+        continue;
+      }
+      byId.set(candidate.productId, {
+        ...existing,
+        ...candidate,
+        productUrl: candidate.productUrl ?? existing.productUrl,
+        consoleName: candidate.consoleName ?? existing.consoleName,
+        ungradedSell: candidate.ungradedSell ?? existing.ungradedSell,
+        grade9: candidate.grade9 ?? existing.grade9,
+        psa10: candidate.psa10 ?? existing.psa10,
+      });
     }
   }
-  for (const candidate of candidates) {
-    if (!ordered.some((item) => item.productId === candidate.productId)) {
-      ordered.push(candidate);
-    }
-    if (ordered.length >= 3) break;
-  }
-  return ordered.slice(0, 3);
+  return [...byId.values()];
+}
+
+function passesThresholds(filters: SearchForm, estimatedProfit: number, estimatedMarginPct: number | null): boolean {
+  if (filters.minProfit && estimatedProfit < filters.minProfit) return false;
+  if (filters.minMarginPct && (estimatedMarginPct ?? 0) < filters.minMarginPct) return false;
+  return true;
 }
