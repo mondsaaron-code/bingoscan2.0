@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import type { ResponseInputContent, ResponseInputItem } from 'openai/resources/responses/responses';
 import type { ScpCandidate } from '@/lib/scp';
 import type { EbayListing } from '@/lib/ebay';
 import type { XimilarCardHints } from '@/lib/ximilar';
@@ -48,7 +49,7 @@ export async function verifyCardMatchWithOpenAI(
     })),
   };
 
-  const userContent: Array<Record<string, unknown>> = [
+  const userContent: ResponseInputContent[] = [
     {
       type: 'input_text',
       text: JSON.stringify(input),
@@ -63,24 +64,26 @@ export async function verifyCardMatchWithOpenAI(
     });
   }
 
+  const inputItems: ResponseInputItem[] = [
+    {
+      role: 'system',
+      content: [
+        {
+          type: 'input_text',
+          text:
+            'You match sports card eBay listings to the exact SportsCardsPro card record. Be conservative. Only return exactMatch=true when you are highly confident in the exact set, player, parallel, insert, numbering, autograph or relic status, and card number. Use the image if provided. If uncertain, choose exactMatch=false, provide the top three candidate product IDs, and explain the ambiguity. Return JSON only.',
+        },
+      ],
+    },
+    {
+      role: 'user',
+      content: userContent,
+    },
+  ];
+
   const response = await getOpenAiClient().responses.create({
     model: 'gpt-5-mini',
-    input: [
-      {
-        role: 'system',
-        content: [
-          {
-            type: 'input_text',
-            text:
-              'You match sports card eBay listings to the exact SportsCardsPro card record. Be conservative. Only return exactMatch=true when you are highly confident in the exact set, player, parallel, insert, numbering, autograph or relic status, and card number. Use the image if provided. If uncertain, choose exactMatch=false, provide the top three candidate product IDs, and explain the ambiguity. Return JSON only.',
-          },
-        ],
-      },
-      {
-        role: 'user',
-        content: userContent,
-      },
-    ],
+    input: inputItems,
     max_output_tokens: 500,
     text: {
       format: {
