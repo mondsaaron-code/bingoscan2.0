@@ -114,6 +114,10 @@ export type DashboardSnapshot = {
     details: string | null;
     createdAt: string;
   }>;
+  diagnosticsSummary: {
+    topRejectionReasons: Array<{ reason: string; count: number }>;
+    stageTimings: Array<{ stage: string; seconds: number; eventCount: number }>;
+  };
   usage: {
     openAiCostTodayUsd: number | null;
     ebayCallsToday: number;

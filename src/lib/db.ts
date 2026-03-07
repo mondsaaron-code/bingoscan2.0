@@ -266,20 +266,31 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
   let needsReviewResults: ScanResultRow[] = [];
   let reviewOptionsByResultId: Record<string, ReviewOption[]> = {};
   let diagnostics: DashboardSnapshot['diagnostics'] = [];
+  let diagnosticsSummary: DashboardSnapshot['diagnosticsSummary'] = {
+    topRejectionReasons: [],
+    stageTimings: [],
+  };
 
-  if (scanId) {
-    const [{ data: resultRows, error: resultError }, { data: eventRows, error: eventError }] = await Promise.all([
+  if (scanId && latestScan) {
+    const [
+      { data: resultRows, error: resultError },
+      { data: eventRows, error: eventError },
+      { data: candidateRows, error: candidateError },
+    ] = await Promise.all([
       getSupabase().from('scan_results').select('*').eq('scan_id', scanId).is('disposition', null).order('created_at', { ascending: false }),
-      getSupabase().from('scan_stage_events').select('*').eq('scan_id', scanId).order('created_at', { ascending: false }).limit(100),
+      getSupabase().from('scan_stage_events').select('*').eq('scan_id', scanId).order('created_at', { ascending: true }).limit(250),
+      getSupabase().from('scan_candidates').select('stage,rejection_reason,created_at').eq('scan_id', scanId).order('created_at', { ascending: false }).limit(500),
     ]);
 
     if (resultError) throw resultError;
     if (eventError) throw eventError;
+    if (candidateError) throw candidateError;
 
     const mapped = ((resultRows ?? []) as Array<Record<string, unknown>>).map(mapResult);
     visibleResults = mapped.filter((row) => !row.needsReview);
     needsReviewResults = mapped.filter((row) => row.needsReview);
-    diagnostics = ((eventRows ?? []) as Array<Record<string, unknown>>).map((row) => ({
+
+    const mappedEvents = ((eventRows ?? []) as Array<Record<string, unknown>>).map((row) => ({
       id: String(row.id),
       level: row.level as 'info' | 'warning' | 'error',
       stage: String(row.stage),
@@ -287,6 +298,12 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
       details: row.details ? String(row.details) : null,
       createdAt: String(row.created_at),
     }));
+
+    diagnostics = [...mappedEvents].reverse();
+    diagnosticsSummary = {
+      topRejectionReasons: buildTopRejectionReasons((candidateRows ?? []) as Array<Record<string, unknown>>),
+      stageTimings: buildStageTimings(latestScan, mappedEvents),
+    };
 
     if (needsReviewResults.length > 0) {
       const { data: options, error: optionsError } = await getSupabase()
@@ -312,6 +329,7 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
     needsReviewResults,
     reviewOptionsByResultId,
     diagnostics,
+    diagnosticsSummary,
     usage,
   };
 }
@@ -409,6 +427,49 @@ function mapReviewOption(row: Record<string, unknown>): ReviewOption {
     scpPsa10: row.scp_psa_10 === null ? null : Number(row.scp_psa_10),
     confidence: row.confidence === null ? null : Number(row.confidence),
   };
+}
+
+
+function buildTopRejectionReasons(rows: Array<Record<string, unknown>>): Array<{ reason: string; count: number }> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const reason = row.rejection_reason ? String(row.rejection_reason).trim() : '';
+    if (!reason) continue;
+    counts.set(reason, (counts.get(reason) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 6)
+    .map(([reason, count]) => ({ reason, count }));
+}
+
+function buildStageTimings(
+  scan: ScanSummary,
+  events: DashboardSnapshot['diagnostics'],
+): Array<{ stage: string; seconds: number; eventCount: number }> {
+  if (events.length === 0) return [];
+
+  const stageStarts: Array<{ stage: string; startedAt: string }> = [];
+  const eventCounts = new Map<string, number>();
+
+  for (const event of events) {
+    eventCounts.set(event.stage, (eventCounts.get(event.stage) ?? 0) + 1);
+    if (!stageStarts.some((item) => item.stage === event.stage)) {
+      stageStarts.push({ stage: event.stage, startedAt: event.createdAt });
+    }
+  }
+
+  const endBoundary = scan.finishedAt ?? new Date().toISOString();
+  return stageStarts.map((item, index) => {
+    const startedAt = new Date(item.startedAt).getTime();
+    const nextStart = stageStarts[index + 1] ? new Date(stageStarts[index + 1].startedAt).getTime() : new Date(endBoundary).getTime();
+    const seconds = Math.max(1, Math.round((nextStart - startedAt) / 1000));
+    return {
+      stage: item.stage,
+      seconds,
+      eventCount: eventCounts.get(item.stage) ?? 0,
+    };
+  });
 }
 
 function defaultMetrics(): ScanMetrics {

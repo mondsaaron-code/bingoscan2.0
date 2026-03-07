@@ -8,7 +8,7 @@ import { ResultsTable } from '@/components/ResultsTable';
 import { DiagnosticsPanel } from '@/components/DiagnosticsPanel';
 import { ScpCacheUploader } from '@/components/ScpCacheUploader';
 import type { DashboardSnapshot, Disposition, SearchForm as SearchFormType } from '@/types/app';
-import { toCurrency } from '@/lib/utils';
+import { toCurrency, toTitleLabel } from '@/lib/utils';
 
 const EMPTY_DASHBOARD: DashboardSnapshot = {
   activeScan: null,
@@ -17,6 +17,10 @@ const EMPTY_DASHBOARD: DashboardSnapshot = {
   needsReviewResults: [],
   reviewOptionsByResultId: {},
   diagnostics: [],
+  diagnosticsSummary: {
+    topRejectionReasons: [],
+    stageTimings: [],
+  },
   usage: {
     openAiCostTodayUsd: null,
     ebayCallsToday: 0,
@@ -141,6 +145,19 @@ export default function DealsPage() {
     ];
   }, [dashboard, scanContext]);
 
+
+  const progress = useMemo(() => {
+    const currentResults = (scanContext?.metrics.dealsFound ?? 0) + (scanContext?.metrics.needsReview ?? 0);
+    const targetResults = 10;
+    const processedCandidates = (scanContext?.metrics.candidatesEvaluated ?? 0) + (scanContext?.metrics.candidatesFilteredOut ?? 0);
+    return {
+      currentResults,
+      targetResults,
+      processedCandidates,
+      pct: Math.min(100, Math.round((currentResults / targetResults) * 100)),
+    };
+  }, [scanContext]);
+
   if (loading) {
     return (
       <div className="page-shell">
@@ -182,6 +199,47 @@ export default function DealsPage() {
           ))}
         </div>
 
+        {scanContext ? (
+          <div className="card card-pad stack">
+            <div className="spread">
+              <div>
+                <div className="section-title">Scan Progress</div>
+                <div className="muted small">
+                  {dashboard.activeScan ? 'Live scan in progress.' : 'Showing the latest completed scan.'}
+                </div>
+              </div>
+              <div className="badge">{toTitleLabel(scanContext.status)}</div>
+            </div>
+            <div>
+              <div className="spread small muted" style={{ marginBottom: 8 }}>
+                <span>{progress.currentResults} / {progress.targetResults} results ready</span>
+                <span>{progress.processedCandidates} candidates processed</span>
+              </div>
+              <div style={{ height: 10, background: '#182033', borderRadius: 9999, overflow: 'hidden' }}>
+                <div style={{ width: `${progress.pct}%`, height: '100%', background: 'linear-gradient(90deg, #4f8cff, #29d391)' }} />
+              </div>
+            </div>
+            <div className="grid grid-4">
+              <div className="kpi">
+                <div className="small muted">Filtered Out</div>
+                <div className="kpi-value">{scanContext.metrics.candidatesFilteredOut}</div>
+              </div>
+              <div className="kpi">
+                <div className="small muted">Warnings</div>
+                <div className="kpi-value">{scanContext.warningCount}</div>
+              </div>
+              <div className="kpi">
+                <div className="small muted">Errors</div>
+                <div className="kpi-value">{scanContext.errorCount}</div>
+              </div>
+              <div className="kpi">
+                <div className="small muted">Current Stage</div>
+                <div className="kpi-value" style={{ fontSize: '1rem' }}>{scanContext.stageMessage ?? '—'}</div>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         <SearchForm onStart={startScan} isBusy={busy || Boolean(dashboard.activeScan)} />
         <ScpCacheUploader />
 
@@ -193,7 +251,7 @@ export default function DealsPage() {
           onDisposition={setDisposition}
           onResolveReview={resolveReview}
         />
-        <DiagnosticsPanel diagnostics={dashboard.diagnostics} />
+        <DiagnosticsPanel diagnostics={dashboard.diagnostics} summary={dashboard.diagnosticsSummary} />
       </div>
     </div>
   );
