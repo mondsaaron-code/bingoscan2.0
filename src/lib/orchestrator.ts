@@ -21,7 +21,7 @@ import {
   getSportsCardsProProduct,
   hydrateSportsCardsProCandidates,
   searchScpCsvCandidates,
-  searchSportsCardsProCandidates,
+  searchSportsCardsProCandidatesMulti,
   type ScpCandidate,
 } from '@/lib/scp';
 import { identifyWithXimilar } from '@/lib/ximilar';
@@ -166,13 +166,28 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
     await appendMetrics(scanId, { ximilarCalls: ximilarHints.callCount });
   }
 
-  const scpQuery = buildScpQuery(listing, details, ximilarHints?.titleHints ?? []);
-  const baseCandidates = await searchSportsCardsProCandidates(scpQuery);
-  await incrementUsage('scp', 1);
-  await appendMetrics(scanId, { scpCalls: 1 });
+  const scpQueries = buildScpQueries(listing, details, filters, ximilarHints?.titleHints ?? []);
+  const scpLookup = await searchSportsCardsProCandidatesMulti(scpQueries, 10);
+  if (scpLookup.queryHits.length > 0) {
+    await incrementUsage('scp', scpLookup.queryHits.length);
+    await appendMetrics(scanId, { scpCalls: scpLookup.queryHits.length });
+    await addScanEvent(
+      scanId,
+      'info',
+      'matching_scp',
+      'Ran SCP candidate queries',
+      scpLookup.queryHits.map((row) => `${row.count} hit(s) · ${row.query}`).join('\n'),
+    );
+  }
 
-  let candidatePool = [...baseCandidates];
-  const hydratedBase = await hydrateSportsCardsProCandidates(rankScpCandidatesLocally(listing, details, baseCandidates).slice(0, 5).map((row) => row.productId));
+  let candidatePool = [...scpLookup.candidates];
+  const initialPrefiltered = prefilterScpCandidates(listing, details, filters, candidatePool, ximilarHints?.titleHints ?? []);
+  if (initialPrefiltered.length > 0 && initialPrefiltered.length < candidatePool.length) {
+    await addScanEvent(scanId, 'info', 'matching_scp', 'Narrowed SCP candidate pool before hydration', `${candidatePool.length} -> ${initialPrefiltered.length}`);
+    candidatePool = initialPrefiltered;
+  }
+
+  const hydratedBase = await hydrateSportsCardsProCandidates(rankScpCandidatesLocally(listing, details, candidatePool).slice(0, 5).map((row) => row.productId));
   if (hydratedBase.length > 0) {
     await incrementUsage('scp', hydratedBase.length);
     await appendMetrics(scanId, { scpCalls: hydratedBase.length });
@@ -186,7 +201,7 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
     if (!cacheEntry.storagePath) continue;
     const cachedCsv = await getScpCacheCsvTextByStoragePath(cacheEntry.storagePath);
     if (!cachedCsv) continue;
-    const cacheCandidates = searchScpCsvCandidates(cachedCsv, scpQuery, 16);
+    const cacheCandidates = mergeCandidates(...scpQueries.slice(0, 3).map((query) => searchScpCsvCandidates(cachedCsv, query, 10)));
     if (cacheCandidates.length > 0) {
       candidatePool = mergeCandidates(candidatePool, cacheCandidates);
       loadedCacheNames.push(cacheEntry.consoleName);
@@ -194,6 +209,12 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
   }
   if (loadedCacheNames.length > 0) {
     await addScanEvent(scanId, 'info', 'matching_scp', 'Loaded SCP set cache', loadedCacheNames.join(' • '));
+  }
+
+  const refinedPool = prefilterScpCandidates(listing, details, filters, candidatePool, ximilarHints?.titleHints ?? []);
+  if (refinedPool.length > 0 && refinedPool.length < candidatePool.length) {
+    await addScanEvent(scanId, 'info', 'matching_scp', 'Refined SCP candidate pool after cache merge', `${candidatePool.length} -> ${refinedPool.length}`);
+    candidatePool = refinedPool;
   }
 
   if (candidatePool.length === 0 && !override) {
@@ -365,19 +386,50 @@ function scoreListingForQueue(listing: EbayListing, filters: SearchForm): number
   });
 }
 
-function buildScpQuery(listing: EbayListing, details: EbayListingDetails | null, hints: string[]): string {
-  const pieces = [
-    listing.title,
-    details?.subtitle ?? '',
-    ...(details ? buildAspectHints(details.aspectMap) : []),
-    hints.join(' '),
-  ];
-  const tokens = tokenizeLoose(pieces.join(' '))
-    .filter((token) => token.length > 1)
-    .slice(0, 20);
-  return compactWhitespace(tokens.join(' '));
-}
+function buildScpQueries(listing: EbayListing, details: EbayListingDetails | null, filters: SearchForm, hints: string[]): string[] {
+  const evidence = extractScpEvidence(listing, details, filters, hints);
+  const queries = new Set<string>();
 
+  const strictPieces = [
+    evidence.year,
+    evidence.brand,
+    evidence.setName,
+    evidence.playerName,
+    evidence.cardNumber ? `#${evidence.cardNumber}` : '',
+    evidence.parallel,
+    evidence.rookie ? 'rookie' : '',
+    evidence.autographed ? 'autograph' : '',
+    evidence.memorabilia ? 'memorabilia' : '',
+  ];
+  queries.add(compactWhitespace(strictPieces.join(' ')));
+
+  const mediumPieces = [
+    evidence.year,
+    evidence.brand,
+    evidence.setName,
+    evidence.playerName,
+    evidence.cardNumber ? `#${evidence.cardNumber}` : '',
+    evidence.parallel || evidence.insert,
+  ];
+  queries.add(compactWhitespace(mediumPieces.join(' ')));
+
+  const broadPieces = [
+    evidence.year,
+    evidence.brand,
+    evidence.playerName,
+    evidence.cardNumber ? `#${evidence.cardNumber}` : '',
+    evidence.insert,
+  ];
+  queries.add(compactWhitespace(broadPieces.join(' ')));
+
+  const fallbackTitleTokens = tokenizeLoose([listing.title, details?.subtitle ?? '', hints.join(' ')].join(' '))
+    .filter((token) => token.length > 1 && !COMMON_TITLE_NOISE.has(token))
+    .slice(0, 12)
+    .join(' ');
+  queries.add(compactWhitespace(fallbackTitleTokens));
+
+  return [...queries].filter((value) => value.length >= 6).slice(0, 4);
+}
 
 function buildScpCacheHints(
   listing: EbayListing,
@@ -573,4 +625,130 @@ function computeAcceptanceThreshold(
 
   threshold = Math.max(BASE_AUTO_ACCEPT_CONFIDENCE, Math.min(97, threshold));
   return { value: threshold, reasons };
+}
+
+
+const COMMON_TITLE_NOISE = new Set([
+  'card',
+  'sports',
+  'trading',
+  'panini',
+  'topps',
+  'upper',
+  'deck',
+  'the',
+  'and',
+  'with',
+  'for',
+  'mint',
+  'near',
+  'look',
+]);
+
+type ScpEvidence = {
+  year: string | null;
+  brand: string | null;
+  setName: string | null;
+  insert: string | null;
+  parallel: string | null;
+  cardNumber: string | null;
+  playerName: string | null;
+  rookie: boolean;
+  autographed: boolean;
+  memorabilia: boolean;
+};
+
+function extractScpEvidence(listing: EbayListing, details: EbayListingDetails | null, filters: SearchForm, hints: string[]): ScpEvidence {
+  const aspectMap = details?.aspectMap ?? {};
+  const titleBlob = `${listing.title} ${details?.subtitle ?? ''} ${hints.join(' ')}`;
+  const extractedPlayer = filters.playerName ?? aspectMap.athlete?.[0] ?? aspectMap['player athlete']?.[0] ?? null;
+  const extractedSet = aspectMap.set?.[0] ?? aspectMap['insert set']?.[0] ?? filters.variant ?? filters.insert ?? null;
+  const extractedInsert = aspectMap['insert set']?.[0] ?? filters.insert ?? null;
+  const extractedParallel = aspectMap['parallel variety']?.[0] ?? aspectMap.parallel?.[0] ?? filters.variant ?? null;
+  const cardNumber = normalizeCardNumber(filters.cardNumber ?? aspectMap['card number']?.[0] ?? extractCardNumber(titleBlob));
+  const year = extractPrimaryYear(titleBlob) ?? (filters.startYear ? String(filters.startYear) : filters.endYear ? String(filters.endYear) : null);
+  const brand = filters.brand ?? aspectMap.manufacturer?.[0] ?? extractKnownBrand(titleBlob);
+  const rookie = Boolean(filters.rookie) || /\brookie\b|\brc\b/i.test(titleBlob);
+  const autographed = Boolean(filters.autographed) || /auto(graph)?|signed/i.test(titleBlob);
+  const memorabilia = Boolean(filters.memorabilia) || /patch|relic|memorabilia|jersey/i.test(titleBlob);
+
+  return {
+    year,
+    brand: compactNullable(brand),
+    setName: compactNullable(extractedSet),
+    insert: compactNullable(extractedInsert),
+    parallel: compactNullable(extractedParallel),
+    cardNumber,
+    playerName: compactNullable(extractedPlayer),
+    rookie,
+    autographed,
+    memorabilia,
+  };
+}
+
+function prefilterScpCandidates(
+  listing: EbayListing,
+  details: EbayListingDetails | null,
+  filters: SearchForm,
+  candidates: ScpCandidate[],
+  hints: string[],
+): ScpCandidate[] {
+  if (candidates.length <= 1) return candidates;
+
+  const evidence = extractScpEvidence(listing, details, filters, hints);
+  const titleBlob = `${listing.title} ${details?.subtitle ?? ''}`.toLowerCase();
+  const filtered = candidates.filter((candidate) => {
+    const haystack = `${candidate.productName} ${candidate.consoleName ?? ''}`.toLowerCase();
+
+    if (evidence.playerName) {
+      const playerTokens = tokenizeLoose(evidence.playerName).filter((token) => token.length > 2);
+      const playerMatches = playerTokens.filter((token) => haystack.includes(token)).length;
+      if (playerTokens.length >= 2 && playerMatches < Math.min(2, playerTokens.length)) return false;
+      if (playerTokens.length === 1 && !haystack.includes(playerTokens[0])) return false;
+    }
+
+    if (evidence.cardNumber) {
+      const cardPatterns = [`#${evidence.cardNumber}`, ` ${evidence.cardNumber} `, `/${evidence.cardNumber}`];
+      const titleHasNumber = cardPatterns.some((pattern) => titleBlob.includes(pattern.trim())) || titleBlob.includes(`#${evidence.cardNumber}`);
+      if (titleHasNumber && !cardPatterns.some((pattern) => haystack.includes(pattern.trim()) || haystack.includes(pattern))) return false;
+    }
+
+    if (evidence.autographed && !/auto|autograph|signature|signed/.test(haystack)) return false;
+    if (evidence.memorabilia && !/memorabilia|patch|relic|jersey/.test(haystack)) return false;
+    if (evidence.rookie && /veteran|non-rookie/.test(haystack)) return false;
+
+    if (evidence.parallel) {
+      const parallelTokens = tokenizeLoose(evidence.parallel).filter((token) => token.length > 2 && !COMMON_TITLE_NOISE.has(token));
+      if (parallelTokens.length > 0) {
+        const matched = parallelTokens.some((token) => haystack.includes(token));
+        if (!matched && /prizm|mosaic|optic|select|chrome|refractor|silver|holo|pulsar|shimmer|mojo|scope|disco|wave|ice|sparkle|velocity|genesis/i.test(evidence.parallel)) {
+          return false;
+        }
+      }
+    }
+
+    return true;
+  });
+
+  return filtered.length > 0 ? filtered : candidates;
+}
+
+function normalizeCardNumber(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const match = String(value).toLowerCase().match(/[a-z0-9-]+/);
+  return match?.[0] ?? null;
+}
+
+function extractCardNumber(value: string): string | null {
+  return value.match(/#\s?([a-z0-9-]+)/i)?.[1] ?? null;
+}
+
+function extractKnownBrand(value: string): string | null {
+  const match = value.match(/\b(panini|topps|bowman|donruss|fleer|upper deck|score|leaf)\b/i)?.[1] ?? null;
+  return match ? compactWhitespace(match) : null;
+}
+
+function compactNullable(value: string | null | undefined): string | null {
+  const output = compactWhitespace(value ?? '');
+  return output || null;
 }

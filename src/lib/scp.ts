@@ -26,6 +26,7 @@ type ScpSingleProductResponse = Record<string, unknown> & {
 const SCP_THROTTLE_MS = 1100;
 let lastScpRequestAt = 0;
 const productCache = new Map<string, ScpCandidate>();
+const queryCache = new Map<string, ScpCandidate[]>();
 
 export function scpSetCacheKey(consoleName: string): string {
   return `${slugify(consoleName)}.csv`;
@@ -48,6 +49,9 @@ export async function searchSportsCardsProCandidates(query: string): Promise<Scp
   const trimmedQuery = compactWhitespace(query);
   if (!trimmedQuery) return [];
 
+  const cached = queryCache.get(trimmedQuery.toLowerCase());
+  if (cached) return cached;
+
   await throttleScp();
   const params = new URLSearchParams({
     t: getRequiredEnv('SPORTSCARDSPRO_API_TOKEN'),
@@ -69,7 +73,26 @@ export async function searchSportsCardsProCandidates(query: string): Promise<Scp
     throw new Error(`SportsCardsPro lookup error: ${body['error-message'] ?? 'Unknown lookup error'}`);
   }
 
-  return (body.products ?? []).slice(0, 20).map((row) => mapScpRow(row, 'api'));
+  const mapped = (body.products ?? []).slice(0, 20).map((row) => mapScpRow(row, 'api'));
+  queryCache.set(trimmedQuery.toLowerCase(), mapped);
+  return mapped;
+}
+
+export async function searchSportsCardsProCandidatesMulti(queries: string[], perQueryLimit = 12): Promise<{ candidates: ScpCandidate[]; queryHits: Array<{ query: string; count: number }> }> {
+  const cleanedQueries = [...new Set(queries.map((value) => compactWhitespace(value)).filter(Boolean))].slice(0, 4);
+  const merged: ScpCandidate[] = [];
+  const queryHits: Array<{ query: string; count: number }> = [];
+
+  for (const query of cleanedQueries) {
+    const rows = await searchSportsCardsProCandidates(query);
+    queryHits.push({ query, count: rows.length });
+    merged.push(...rows.slice(0, perQueryLimit));
+  }
+
+  return {
+    candidates: dedupeCandidates(merged),
+    queryHits,
+  };
 }
 
 export async function getSportsCardsProProduct(productId: string): Promise<ScpCandidate | null> {
@@ -206,4 +229,26 @@ function splitCsvLine(line: string): string[] {
   }
   values.push(current);
   return values;
+}
+
+function dedupeCandidates(candidates: ScpCandidate[]): ScpCandidate[] {
+  const byId = new Map<string, ScpCandidate>();
+  for (const candidate of candidates) {
+    const existing = byId.get(candidate.productId);
+    if (!existing) {
+      byId.set(candidate.productId, candidate);
+      continue;
+    }
+    byId.set(candidate.productId, {
+      ...existing,
+      ...candidate,
+      productUrl: candidate.productUrl ?? existing.productUrl,
+      consoleName: candidate.consoleName ?? existing.consoleName,
+      ungradedSell: candidate.ungradedSell ?? existing.ungradedSell,
+      grade9: candidate.grade9 ?? existing.grade9,
+      psa10: candidate.psa10 ?? existing.psa10,
+      source: candidate.source === 'api' || existing.source === 'api' ? 'api' : existing.source,
+    });
+  }
+  return [...byId.values()];
 }
