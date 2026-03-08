@@ -1,4 +1,5 @@
 import type { EbayListingDetails } from '@/lib/ebay';
+import { compactWhitespace } from '@/lib/utils';
 import type { CardConditionMode, SearchForm } from '@/types/app';
 
 const BLOCK_WORDS = [
