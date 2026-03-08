@@ -4,6 +4,7 @@ import {
   appendMetrics,
   findScpCacheMatches,
   getExceededUsageLimits,
+  getRecentStageEvents,
   getManualMatchOverride,
   getRecentAuctionOutcomeMemory,
   getRecentBadLogicPatterns,
@@ -44,8 +45,11 @@ import {
   buildPriceBandOutcomeMemory,
   buildReviewResolutionMemory,
   buildTitleOutcomeMemory,
+  classifyProviderFailure,
   compactWhitespace,
+  formatProviderFailure,
   determineGradingLane,
+  sleep,
   normalizeSellerUsername,
   normalizeTitleFingerprint,
   scoreListingAgainstAuctionMemory,
@@ -80,6 +84,8 @@ const PRICE_BAND_OUTCOME_CACHE_TTL_MS = 2 * 60 * 1000;
 const CARD_NUMBER_OUTCOME_CACHE_TTL_MS = 2 * 60 * 1000;
 const MAX_EXACT_FAMILY_RESULTS = 1;
 const MAX_CLUSTER_RESULTS = 2;
+const LOW_YIELD_STOP_MIN_RESULTS = 6;
+const LOW_YIELD_STREAK_TO_STOP = 3;
 
 let badLogicCache: { loadedAt: number; rows: Array<{ ebayTitle: string; fingerprint: string; createdAt: string; reasoning: string | null }> } | null = null;
 let titleOutcomeMemoryCache: { loadedAt: number; memory: ReturnType<typeof buildTitleOutcomeMemory> } | null = null;
@@ -120,7 +126,22 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
 
   await markScanStatus(scanId, 'fetching_ebay', 'Fetching eBay listings');
   const offset = scan.metrics.candidatesFetched;
-  const listings = await searchEbayListings(scan.filters, offset, FETCH_PAGE_SIZE);
+  const searchOutcome = await withProviderRetries('ebay', 'search', () => searchEbayListings(scan.filters, offset, FETCH_PAGE_SIZE), {
+    scanId,
+    stage: 'fetching_ebay',
+    attempts: 2,
+  });
+
+  if (!searchOutcome.ok) {
+    if (searchOutcome.failure.recoverable) {
+      await markScanStatus(scanId, 'fetching_ebay', 'Temporary eBay search issue; retry on next worker tick');
+      return (await getScanById(scanId))!;
+    }
+    await markScanStatus(scanId, 'failed', `eBay search failed: ${searchOutcome.failure.message}`);
+    return (await getScanById(scanId))!;
+  }
+
+  const listings = searchOutcome.value;
   await incrementUsage('ebay', 1);
   await appendMetrics(scanId, { ebayCalls: 1, candidatesFetched: listings.length });
   await addScanEvent(scanId, 'info', 'fetching_ebay', `Fetched ${listings.length} eBay candidates`, `Offset ${offset}`);
@@ -159,6 +180,8 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
       .join('\n'),
   );
 
+  const tickResultsBefore = currentResults;
+  const tickEvaluatedBefore = scan.metrics.candidatesEvaluated;
   let processed = 0;
   const tickBudget = getTickBudget(currentResults, scan.metrics.dealsFound);
   for (const { listing, score } of prioritizedListings) {
@@ -232,7 +255,28 @@ Priority ${score}`);
     }
   }
 
-  return (await getScanById(scanId))!;
+  const refreshedScan = (await getScanById(scanId))!;
+  const tickResultsAfter = refreshedScan.metrics.dealsFound + refreshedScan.metrics.needsReview;
+  const tickEvaluatedAfter = refreshedScan.metrics.candidatesEvaluated;
+  const resultsDelta = tickResultsAfter - tickResultsBefore;
+  const evaluatedDelta = tickEvaluatedAfter - tickEvaluatedBefore;
+
+  if (resultsDelta > 0) {
+    await addScanEvent(scanId, 'info', 'worker_summary', 'Batch produced results', `+${resultsDelta} result(s) from ${evaluatedDelta} evaluated candidate(s)`);
+  } else {
+    await addScanEvent(scanId, 'info', 'worker_summary', 'No publishable results from batch', `Evaluated ${evaluatedDelta} candidate(s) from ${listings.length} fetched listing(s)`);
+  }
+
+  if (tickResultsAfter >= LOW_YIELD_STOP_MIN_RESULTS) {
+    const recentEvents = await getRecentStageEvents(scanId, 10);
+    if (shouldStopAfterLowYieldStreak(recentEvents)) {
+      await markScanStatus(scanId, 'completed', 'Stopped after consecutive low-yield batches once enough results were already captured');
+      await addScanEvent(scanId, 'info', 'worker_summary', 'Completed early after low-yield streak', `Current results: ${tickResultsAfter}`);
+      return (await getScanById(scanId))!;
+    }
+  }
+
+  return refreshedScan;
 }
 
 async function evaluateListing(
@@ -386,7 +430,19 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
   }
 
   const scpQueries = buildScpQueries(listing, details, filters, ximilarHints?.titleHints ?? []);
-  const { candidates: baseCandidates, queryHits } = await searchSportsCardsProCandidatesMulti(scpQueries, 10);
+  const scpSearchOutcome = await withProviderRetries('scp', 'candidate search', () => searchSportsCardsProCandidatesMulti(scpQueries, 10), {
+    scanId,
+    stage: 'matching_scp',
+    attempts: 2,
+  });
+  if (!scpSearchOutcome.ok) {
+    const rejectionReason = `SCP lookup unavailable: ${scpSearchOutcome.failure.message}`;
+    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: rejectionReason });
+    await addScanEvent(scanId, scpSearchOutcome.failure.recoverable ? 'warning' : 'error', 'matching_scp', rejectionReason, listing.title);
+    return;
+  }
+
+  const { candidates: baseCandidates, queryHits } = scpSearchOutcome.value;
   if (queryHits.length > 0) {
     await incrementUsage('scp', queryHits.length);
     await appendMetrics(scanId, { scpCalls: queryHits.length });
@@ -400,7 +456,28 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
   }
 
   let candidatePool = [...baseCandidates];
-  const hydratedBase = await hydrateSportsCardsProCandidates(rankScpCandidatesLocally(listing, details, filters, baseCandidates, reviewResolutionMemory, cardNumberOutcomeMemory).slice(0, 5).map((row) => row.candidate.productId));
+  const hydrateOutcome = await withProviderRetries(
+    'scp',
+    'candidate hydration',
+    () => hydrateSportsCardsProCandidates(
+      rankScpCandidatesLocally(listing, details, filters, baseCandidates, reviewResolutionMemory, cardNumberOutcomeMemory)
+        .slice(0, 5)
+        .map((row) => row.candidate.productId),
+    ),
+    {
+      scanId,
+      stage: 'matching_scp',
+      attempts: 2,
+    },
+  );
+  if (!hydrateOutcome.ok) {
+    const rejectionReason = `SCP hydration unavailable: ${hydrateOutcome.failure.message}`;
+    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: rejectionReason });
+    await addScanEvent(scanId, hydrateOutcome.failure.recoverable ? 'warning' : 'error', 'matching_scp', rejectionReason, listing.title);
+    return;
+  }
+
+  const hydratedBase = hydrateOutcome.value;
   if (hydratedBase.length > 0) {
     await incrementUsage('scp', hydratedBase.length);
     await appendMetrics(scanId, { scpCalls: hydratedBase.length });
@@ -500,12 +577,46 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     .filter((row, index) => !(row.reviewMemory.score <= -10 && row.cardNumberMemory.score <= -10 && index > 0))
     .slice(0, 5)
     .map((row) => row.candidate);
-  const decision = await verifyCardMatchWithOpenAI(listing, rankedCandidates, {
+  const openAiOutcome = await withProviderRetries('openai', 'exact match verification', () => verifyCardMatchWithOpenAI(listing, rankedCandidates, {
     ximilarHints: ximilarHints?.titleHints ?? [],
     details,
+  }), {
+    scanId,
+    stage: 'ai_verifying',
+    attempts: 2,
   });
-  await incrementUsage('openai', 1);
-  await appendMetrics(scanId, { openaiCalls: 1 });
+
+  let decision: Awaited<ReturnType<typeof verifyCardMatchWithOpenAI>>;
+  if (!openAiOutcome.ok) {
+    const placeholderCandidate = rankedCandidates[0] ?? null;
+    if (!placeholderCandidate) {
+      await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: `OpenAI verification unavailable: ${openAiOutcome.failure.message}` });
+      await addScanEvent(scanId, openAiOutcome.failure.recoverable ? 'warning' : 'error', 'ai_verifying', 'OpenAI verification unavailable and no fallback candidate existed', listing.title);
+      return;
+    }
+
+    const placeholderProfit = placeholderCandidate.ungradedSell !== null && placeholderCandidate.ungradedSell !== undefined
+      ? placeholderCandidate.ungradedSell - listing.total
+      : null;
+    const placeholderMargin = placeholderCandidate.ungradedSell && placeholderProfit !== null ? (placeholderProfit / listing.total) * 100 : null;
+    if (placeholderProfit !== null && !passesThresholds(filters, placeholderProfit, placeholderMargin)) {
+      await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: `OpenAI verification unavailable and fallback candidate missed thresholds: ${openAiOutcome.failure.message}` });
+      return;
+    }
+
+    decision = {
+      exactMatch: false,
+      confidence: 0,
+      reasoning: `OpenAI verification unavailable; queued for manual review using the top ranked SCP options. ${openAiOutcome.failure.message}`,
+      chosenProductId: placeholderCandidate.productId,
+      topThreeProductIds: rankedCandidates.slice(0, 3).map((candidate) => candidate.productId),
+      extractedAttributes: {},
+    };
+  } else {
+    decision = openAiOutcome.value;
+    await incrementUsage('openai', 1);
+    await appendMetrics(scanId, { openaiCalls: 1 });
+  }
 
   const chosen = rankedCandidates.find((candidate) => candidate.productId === decision.chosenProductId) ?? rankedCandidates[0] ?? null;
   const chosenCardNumberSignal = chosen
@@ -597,16 +708,20 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
 }
 
 async function getEbayDetailsWithLogging(scanId: string, listing: EbayListing): Promise<EbayListingDetails | null> {
-  try {
-    const details = await getEbayListingDetails(listing.itemId);
-    await incrementUsage('ebay', 1);
-    await appendMetrics(scanId, { ebayCalls: 1 });
-    return details;
-  } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unable to load eBay item details';
-    await addScanEvent(scanId, 'warning', 'matching_scp', 'Failed to hydrate eBay item details', `${listing.title}\n${message}`);
+  const outcome = await withProviderRetries('ebay', 'item detail hydration', () => getEbayListingDetails(listing.itemId), {
+    scanId,
+    stage: 'matching_scp',
+    attempts: 2,
+  });
+
+  if (!outcome.ok) {
+    await addScanEvent(scanId, outcome.failure.recoverable ? 'warning' : 'error', 'matching_scp', 'Failed to hydrate eBay item details', `${listing.title}\n${formatProviderFailure(outcome.failure)}`);
     return null;
   }
+
+  await incrementUsage('ebay', 1);
+  await appendMetrics(scanId, { ebayCalls: 1 });
+  return outcome.value;
 }
 
 async function insertResultPayload(
@@ -1072,6 +1187,45 @@ function passesThresholds(filters: SearchForm, estimatedProfit: number, estimate
   return true;
 }
 
+
+
+type ProviderRetryOutcome<T> =
+  | { ok: true; value: T }
+  | { ok: false; failure: ReturnType<typeof classifyProviderFailure> };
+
+async function withProviderRetries<T>(
+  provider: 'ebay' | 'scp' | 'openai' | 'ximilar',
+  action: string,
+  fn: () => Promise<T>,
+  options: { scanId: string; stage: string; attempts?: number },
+): Promise<ProviderRetryOutcome<T>> {
+  const attempts = Math.max(1, options.attempts ?? 2);
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return { ok: true, value: await fn() };
+    } catch (error) {
+      const failure = classifyProviderFailure(provider, error);
+      const shouldRetry = failure.recoverable && attempt < attempts;
+      const detail = `${action} attempt ${attempt}/${attempts}
+${formatProviderFailure(failure)}`;
+      await addScanEvent(options.scanId, shouldRetry ? 'warning' : failure.recoverable ? 'warning' : 'error', options.stage, `${provider.toUpperCase()} ${action} failed`, detail);
+      if (!shouldRetry) {
+        return { ok: false, failure };
+      }
+      await sleep(450 * attempt);
+    }
+  }
+
+  return { ok: false, failure: classifyProviderFailure(provider, new Error(`${provider} ${action} failed`)) };
+}
+
+function shouldStopAfterLowYieldStreak(
+  events: Array<{ stage: string; message: string }>,
+): boolean {
+  const summaries = events.filter((event) => event.stage === 'worker_summary').slice(0, LOW_YIELD_STREAK_TO_STOP);
+  return summaries.length >= LOW_YIELD_STREAK_TO_STOP && summaries.every((event) => event.message === 'No publishable results from batch');
+}
 
 
 async function getTitleOutcomeMemoryCached(): Promise<ReturnType<typeof buildTitleOutcomeMemory>> {

@@ -32,6 +32,18 @@ Optional guardrails:
 
 The worker will stop a scan with a specific warning if one of these configured daily budgets is reached.
 
+## Environment notes
+
+`NEXT_PUBLIC_` variables are embedded into the browser bundle at build time, so if you change:
+
+- `NEXT_PUBLIC_SUPABASE_URL`
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
+- `NEXT_PUBLIC_APP_URL`
+
+redeploy after saving the new values in Vercel.
+
+This pass also includes a browser-safe Supabase client env fix, so the login page now reads `NEXT_PUBLIC_*` variables through direct static references.
+
 ## GitHub
 
 Push as a fresh repo.

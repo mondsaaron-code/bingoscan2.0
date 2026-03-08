@@ -47,6 +47,63 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export type ProviderFailure = {
+  provider: 'ebay' | 'scp' | 'openai' | 'ximilar';
+  category: 'rate_limit' | 'timeout' | 'upstream' | 'network' | 'auth' | 'config' | 'validation' | 'unknown';
+  status: number | null;
+  recoverable: boolean;
+  message: string;
+  raw: string;
+};
+
+export function classifyProviderFailure(
+  provider: ProviderFailure['provider'],
+  error: unknown,
+): ProviderFailure {
+  const raw = error instanceof Error ? error.message : String(error ?? 'Unknown error');
+  const statusMatch = raw.match(/\((\d{3})\)/);
+  const status = statusMatch ? Number(statusMatch[1]) : null;
+  const lower = raw.toLowerCase();
+
+  let category: ProviderFailure['category'] = 'unknown';
+  let recoverable = false;
+
+  if (/429|rate limit|too many requests/.test(lower) || status === 429) {
+    category = 'rate_limit';
+    recoverable = true;
+  } else if (/timeout|timed out|etimedout|aborted/.test(lower) || status === 408 || status === 504) {
+    category = 'timeout';
+    recoverable = true;
+  } else if (/network|fetch failed|econnreset|enotfound|eai_again|socket hang up/.test(lower)) {
+    category = 'network';
+    recoverable = true;
+  } else if (status !== null && [500, 502, 503, 504].includes(status)) {
+    category = 'upstream';
+    recoverable = true;
+  } else if (/401|403|unauthorized|forbidden|invalid api key|missing required environment variable/.test(lower) || status === 401 || status === 403) {
+    category = /missing required environment variable/.test(lower) ? 'config' : 'auth';
+    recoverable = false;
+  } else if (/400|404|422|invalid|schema|zod/.test(lower) || status === 400 || status === 404 || status === 422) {
+    category = 'validation';
+    recoverable = false;
+  }
+
+  return {
+    provider,
+    category,
+    status,
+    recoverable,
+    message: compactWhitespace(raw.replace(/\s+/g, ' ')).slice(0, 500),
+    raw,
+  };
+}
+
+export function formatProviderFailure(failure: ProviderFailure): string {
+  const statusPart = failure.status ? ` (${failure.status})` : '';
+  const categoryLabel = failure.category.replace(/_/g, ' ');
+  return `${failure.provider.toUpperCase()} ${categoryLabel}${statusPart}: ${failure.message}`;
+}
+
 export function safeJsonParse<T>(value: unknown, fallback: T): T {
   if (!value) return fallback;
   if (typeof value === 'object') return value as T;

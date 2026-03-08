@@ -308,6 +308,26 @@ export async function addScanEvent(
   }
 }
 
+export async function getRecentStageEvents(
+  scanId: string,
+  limit = 12,
+): Promise<Array<{ level: 'info' | 'warning' | 'error'; stage: string; message: string; details: string | null; createdAt: string }>> {
+  const { data, error } = await getSupabase()
+    .from('scan_stage_events')
+    .select('level,stage,message,details,created_at')
+    .eq('scan_id', scanId)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return ((data ?? []) as Array<Record<string, unknown>>).map((row) => ({
+    level: row.level as 'info' | 'warning' | 'error',
+    stage: String(row.stage),
+    message: String(row.message),
+    details: row.details ? String(row.details) : null,
+    createdAt: String(row.created_at),
+  }));
+}
+
 export async function getScanById(scanId: string): Promise<ScanSummary | null> {
   const { data, error } = await getSupabase().from('scans').select('*').eq('id', scanId).maybeSingle();
   if (error) throw error;
