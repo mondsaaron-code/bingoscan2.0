@@ -73,6 +73,18 @@ type PriceBandOutcomeMemoryDbRow = {
   disposition: Disposition;
 };
 
+type PlayerOutcomeMemoryDbRow = {
+  ebayTitle: string;
+  scpProductName: string | null;
+  disposition: Disposition;
+};
+
+type CardNumberOutcomeMemoryDbRow = {
+  ebayTitle: string;
+  scpProductName: string | null;
+  disposition: Disposition;
+};
+
 export type SellerOutcomeMemory = {
   sellerUsername: string;
   total: number;
@@ -488,6 +500,40 @@ export async function getRecentPriceBandOutcomeMemory(limit = 500): Promise<Pric
       totalPurchasePrice: Number(row.total_purchase_price),
       estimatedProfit: row.estimated_profit === null || row.estimated_profit === undefined ? null : Number(row.estimated_profit),
       estimatedMarginPct: row.estimated_margin_pct === null || row.estimated_margin_pct === undefined ? null : Number(row.estimated_margin_pct),
+      disposition: row.disposition as Disposition,
+    }));
+}
+
+export async function getRecentPlayerOutcomeMemory(limit = 500): Promise<PlayerOutcomeMemoryDbRow[]> {
+  const { data, error } = await getSupabase()
+    .from('scan_results')
+    .select('ebay_title, scp_product_name, disposition')
+    .not('disposition', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return ((data ?? []) as Array<Record<string, unknown>>)
+    .filter((row) => row.ebay_title && row.disposition)
+    .map((row) => ({
+      ebayTitle: String(row.ebay_title),
+      scpProductName: row.scp_product_name ? String(row.scp_product_name) : null,
+      disposition: row.disposition as Disposition,
+    }));
+}
+
+export async function getRecentCardNumberOutcomeMemory(limit = 500): Promise<CardNumberOutcomeMemoryDbRow[]> {
+  const { data, error } = await getSupabase()
+    .from('scan_results')
+    .select('ebay_title, scp_product_name, disposition')
+    .not('disposition', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return ((data ?? []) as Array<Record<string, unknown>>)
+    .filter((row) => row.ebay_title && row.disposition)
+    .map((row) => ({
+      ebayTitle: String(row.ebay_title),
+      scpProductName: row.scp_product_name ? String(row.scp_product_name) : null,
       disposition: row.disposition as Disposition,
     }));
 }

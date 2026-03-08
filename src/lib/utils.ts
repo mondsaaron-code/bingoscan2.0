@@ -940,3 +940,162 @@ export function tokenSimilarity(left: string, right: string): number {
   const union = new Set([...leftSet, ...rightSet]).size;
   return union ? intersection / union : 0;
 }
+
+
+const PLAYER_MEMORY_STOP_WORDS = new Set([
+  'panini', 'topps', 'bowman', 'upper', 'deck', 'donruss', 'fleer', 'score', 'leaf', 'finest', 'chrome', 'optic', 'prizm', 'mosaic', 'select', 'contenders',
+  'absolute', 'prestige', 'playoff', 'heritage', 'stadium', 'club', 'archives', 'donruss', 'elite', 'origins', 'obsidian', 'phoenix', 'revolution',
+  'rookie', 'rc', 'auto', 'autograph', 'signed', 'patch', 'relic', 'jersey', 'memorabilia', 'graded', 'raw', 'psa', 'bgs', 'sgc', 'cgc',
+  'silver', 'green', 'blue', 'red', 'purple', 'orange', 'gold', 'pink', 'black', 'white', 'bronze', 'sepia', 'negative', 'wave', 'mojo', 'disco', 'shimmer',
+  'sparkle', 'pulsar', 'laser', 'ice', 'cracked', 'reactive', 'fluorescent', 'checkerboard', 'zebra', 'tiger', 'peacock', 'nebula', 'parallel',
+  'football', 'baseball', 'basketball', 'hockey', 'cards', 'card', 'trading', 'sports', 'set', 'insert', 'variation', 'var', 'ssp', 'sp', 'casehit', 'case', 'hit',
+  'mint', 'gem', 'serial', 'numbered', 'out', 'of', 'holo', 'refractor', 'rainbow', 'scope', 'velocity', 'choice', 'premier', 'ticket', 'downtown', 'kaboom',
+])
+
+export type PlayerOutcomeMemoryRow = {
+  ebayTitle: string;
+  scpProductName?: string | null;
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic';
+};
+
+export type PlayerOutcomeMemory = {
+  player: Map<string, number>;
+};
+
+function normalizePlayerNameKey(value: string | null | undefined): string | null {
+  const tokens = tokenizeLoose(value ?? '')
+    .map((token) => token.replace(/[^a-z'-]+/g, ''))
+    .filter((token) => token.length >= 2)
+    .filter((token) => !PLAYER_MEMORY_STOP_WORDS.has(token));
+  if (tokens.length === 0) return null;
+  return tokens.slice(0, 2).join(' ');
+}
+
+export function inferPlayerKey(args: { ebayTitle: string; scpProductName?: string | null; requestedPlayerName?: string | null }): string | null {
+  const requested = normalizePlayerNameKey(args.requestedPlayerName ?? null);
+  if (requested) return requested;
+
+  const source = compactWhitespace(`${args.scpProductName ?? ''} ${args.ebayTitle}`);
+  const tokens = tokenizeLoose(source)
+    .map((token) => token.replace(/[^a-z'-]+/g, ''))
+    .filter((token) => token.length >= 2)
+    .filter((token) => !PLAYER_MEMORY_STOP_WORDS.has(token))
+    .filter((token) => !/^(19|20)\d{2}$/.test(token));
+
+  const unique: string[] = [];
+  for (const token of tokens) {
+    if (!unique.includes(token)) unique.push(token);
+  }
+  if (unique.length >= 2) return `${unique[0]} ${unique[1]}`;
+  return unique[0] ?? null;
+}
+
+export function buildPlayerOutcomeMemory(rows: PlayerOutcomeMemoryRow[]): PlayerOutcomeMemory {
+  const player = new Map<string, number>();
+  for (const row of rows) {
+    const playerKey = inferPlayerKey({ ebayTitle: row.ebayTitle, scpProductName: row.scpProductName ?? null });
+    if (!playerKey) continue;
+    const weight = row.disposition === 'purchased' ? 5 : row.disposition === 'bad_logic' ? -7 : -2;
+    player.set(playerKey, (player.get(playerKey) ?? 0) + weight);
+  }
+  return { player };
+}
+
+export function scoreListingAgainstPlayerMemory(
+  args: { ebayTitle: string; scpProductName?: string | null; requestedPlayerName?: string | null },
+  memory: PlayerOutcomeMemory | null | undefined,
+): { score: number; reason: string | null; playerKey: string | null } {
+  const playerKey = inferPlayerKey(args);
+  if (!playerKey || !memory) return { score: 0, reason: null, playerKey };
+  const total = Math.max(-12, Math.min(12, memory.player.get(playerKey) ?? 0));
+  if (total <= -8) return { score: total, reason: 'historically weak player pocket', playerKey };
+  if (total <= -4) return { score: total, reason: 'mixed player history', playerKey };
+  if (total >= 7) return { score: total, reason: 'historically productive player pocket', playerKey };
+  if (total >= 4) return { score: total, reason: 'decent player history', playerKey };
+  return { score: total, reason: null, playerKey };
+}
+
+export type CardNumberOutcomeMemoryRow = {
+  ebayTitle: string;
+  scpProductName?: string | null;
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic';
+};
+
+export type CardNumberOutcomeMemory = {
+  globalCategory: Map<string, number>;
+  familyCategory: Map<string, Map<string, number>>;
+};
+
+export function extractCardNumberEvidenceToken(value: string | null | undefined): string | null {
+  const input = compactWhitespace(value ?? '').toLowerCase();
+  if (!input) return null;
+  const hashMatch = input.match(/#\s*([a-z0-9-]{1,8})\b/i)?.[1];
+  if (hashMatch && !/^(19|20)\d{2}$/.test(hashMatch)) return hashMatch.toLowerCase();
+
+  for (const token of tokenizeLoose(input)) {
+    const normalized = token.replace(/^#/, '').replace(/[^a-z0-9-]/g, '');
+    if (!normalized || normalized.length > 8) continue;
+    if (/^(19|20)\d{2}$/.test(normalized)) continue;
+    if (!/\d/.test(normalized)) continue;
+    if (/^\d{2,4}$/.test(normalized) && input.includes(`/${normalized}`)) continue;
+    return normalized.toLowerCase();
+  }
+  return null;
+}
+
+function getCardNumberEvidenceCategory(args: { ebayTitle: string; scpProductName?: string | null }): { category: string; listingToken: string | null; productToken: string | null; familyKey: string | null } {
+  const listingToken = extractCardNumberEvidenceToken(args.ebayTitle);
+  const productToken = extractCardNumberEvidenceToken(args.scpProductName ?? null);
+  const familyKey = buildDealDiversityKeys({ ebayTitle: args.ebayTitle, scpProductName: args.scpProductName ?? null }).cluster || normalizeTitleFingerprint(args.ebayTitle);
+  let category = 'missing';
+  if (listingToken && productToken) {
+    category = listingToken === productToken ? 'match' : 'mismatch';
+  } else if (listingToken) {
+    category = 'listing_only';
+  } else if (productToken) {
+    category = 'candidate_only';
+  }
+  return { category, listingToken, productToken, familyKey };
+}
+
+export function buildCardNumberOutcomeMemory(rows: CardNumberOutcomeMemoryRow[]): CardNumberOutcomeMemory {
+  const globalCategory = new Map<string, number>();
+  const familyCategory = new Map<string, Map<string, number>>();
+  for (const row of rows) {
+    const evidence = getCardNumberEvidenceCategory({ ebayTitle: row.ebayTitle, scpProductName: row.scpProductName ?? null });
+    const weight = row.disposition === 'purchased' ? 4 : row.disposition === 'bad_logic' ? -6 : -2;
+    globalCategory.set(evidence.category, (globalCategory.get(evidence.category) ?? 0) + weight);
+    if (!evidence.familyKey) continue;
+    if (!familyCategory.has(evidence.familyKey)) familyCategory.set(evidence.familyKey, new Map());
+    const familyMap = familyCategory.get(evidence.familyKey)!;
+    familyMap.set(evidence.category, (familyMap.get(evidence.category) ?? 0) + weight);
+  }
+  return { globalCategory, familyCategory };
+}
+
+export function scoreScpCandidateAgainstCardNumberMemory(
+  args: { ebayTitle: string; scpProductName?: string | null; requestedCardNumber?: string | null },
+  memory: CardNumberOutcomeMemory | null | undefined,
+): { score: number; reason: string | null; category: string; listingToken: string | null; productToken: string | null; requestedToken: string | null; familyKey: string | null } {
+  const evidence = getCardNumberEvidenceCategory(args);
+  const requestedToken = extractCardNumberEvidenceToken(args.requestedCardNumber ?? null);
+  let total = 0;
+  if (memory) {
+    total += memory.globalCategory.get(evidence.category) ?? 0;
+    total += evidence.familyKey ? (memory.familyCategory.get(evidence.familyKey)?.get(evidence.category) ?? 0) : 0;
+  }
+
+  if (requestedToken) {
+    if (evidence.productToken && evidence.productToken === requestedToken) total += 5;
+    else if (evidence.productToken && evidence.productToken !== requestedToken) total -= 8;
+    if (evidence.listingToken && evidence.listingToken === requestedToken) total += 3;
+    else if (evidence.listingToken && evidence.listingToken !== requestedToken) total -= 6;
+  }
+
+  total = Math.max(-16, Math.min(16, total));
+  if (total <= -10) return { ...evidence, requestedToken, score: total, reason: 'historically weak card-number evidence' };
+  if (total <= -5) return { ...evidence, requestedToken, score: total, reason: 'mixed card-number evidence history' };
+  if (total >= 10) return { ...evidence, requestedToken, score: total, reason: 'historically strong card-number evidence' };
+  if (total >= 5) return { ...evidence, requestedToken, score: total, reason: 'decent card-number evidence' };
+  return { ...evidence, requestedToken, score: total, reason: null };
+}
