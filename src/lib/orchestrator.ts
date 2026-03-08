@@ -15,6 +15,7 @@ import {
   getRecentReviewResolutionMemory,
   getRecentTitleOutcomeMemory,
   getScanById,
+  getEbaySearchPageCount,
   getScanResultMemory,
   getScpCacheCsvTextByStoragePath,
   getSellerOutcomeMemory,
