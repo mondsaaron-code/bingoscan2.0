@@ -1,4 +1,4 @@
-import { buildKeywordClauses, buildNegativeClauses } from '@/lib/filters';
+import { buildEbayQueryTerms } from '@/lib/filters';
 import { getRequiredEnv } from '@/lib/env';
 import { compactWhitespace } from '@/lib/utils';
 import type { SearchForm } from '@/types/app';
@@ -75,7 +75,7 @@ export async function searchEbayListings(filters: SearchForm, offset = 0, limit 
   const token = await getEbayAccessToken();
   const environment = process.env.EBAY_ENVIRONMENT === 'sandbox' ? 'api.sandbox.ebay.com' : 'api.ebay.com';
 
-  const q = [...buildKeywordClauses(filters), ...buildNegativeClauses(filters).map(formatNegativeClause)].join(' ');
+  const q = buildEbayQueryTerms(filters).join(' ');
   const params = new URLSearchParams({
     q,
     limit: String(limit),
@@ -218,11 +218,6 @@ function sportToCategoryId(_sport: string): string {
   return '261328';
 }
 
-
-function formatNegativeClause(value: string): string {
-  const clean = compactWhitespace(value);
-  return /\s/.test(clean) ? `-"${clean}"` : `-${clean}`;
-}
 
 
 function buildEbayFilter(filters: SearchForm): string {

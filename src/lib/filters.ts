@@ -177,11 +177,11 @@ function normalizeFilterValue(value: string | null | undefined): string {
 function buildSportClause(filters: SearchForm): string | null {
   const normalized = filters.sport.trim().toLowerCase();
   if (!normalized) return null;
-  if (normalized === 'football') return 'football trading card';
-  if (normalized === 'basketball') return 'basketball trading card';
-  if (normalized === 'baseball') return 'baseball trading card';
-  if (normalized === 'hockey') return 'hockey trading card';
-  return `${normalized} trading card`;
+  if (normalized === 'football') return 'football';
+  if (normalized === 'basketball') return 'basketball';
+  if (normalized === 'baseball') return 'baseball';
+  if (normalized === 'hockey') return 'hockey';
+  return normalized;
 }
 
 export function buildKeywordClauses(filters: SearchForm): string[] {
@@ -195,17 +195,36 @@ export function buildKeywordClauses(filters: SearchForm): string[] {
   if (filters.brand) clauses.push(filters.brand);
   if (filters.variant) clauses.push(filters.variant);
   if (filters.insert) clauses.push(filters.insert);
-  if (filters.cardNumber) clauses.push(`#${filters.cardNumber}`);
-  if (filters.playerName) clauses.push(`"${filters.playerName}"`);
+  if (filters.cardNumber) clauses.push(filters.cardNumber);
+  if (filters.playerName) clauses.push(filters.playerName);
   if (filters.position) clauses.push(filters.position);
-  if (filters.team) clauses.push(`"${filters.team}"`);
+  if (filters.team) clauses.push(filters.team);
   if (filters.numberedOutOf) clauses.push(`/${filters.numberedOutOf}`);
   if (filters.rookie) clauses.push('rookie');
-  if (filters.autographed) clauses.push('auto OR autograph');
-  if (filters.memorabilia) clauses.push('memorabilia OR patch OR relic');
-  if (filters.numberedCard) clauses.push('numbered');
-  if (filters.conditionMode === 'graded') clauses.push('graded');
+  if (filters.autographed) clauses.push('autograph');
+  if (filters.memorabilia) clauses.push('patch');
   return clauses.filter(Boolean);
+}
+
+export function buildEbayQueryTerms(filters: SearchForm): string[] {
+  const terms: string[] = [];
+  const sport = filters.sport.trim().toLowerCase();
+  if (sport) terms.push(sport);
+  if (filters.startYear && filters.endYear && filters.startYear === filters.endYear) terms.push(String(filters.startYear));
+  else {
+    if (filters.startYear) terms.push(String(filters.startYear));
+    if (filters.endYear && filters.endYear !== filters.startYear) terms.push(String(filters.endYear));
+  }
+  if (filters.brand) terms.push(filters.brand);
+  if (filters.variant) terms.push(filters.variant);
+  if (filters.insert) terms.push(filters.insert);
+  if (filters.cardNumber) terms.push(filters.cardNumber);
+  if (filters.playerName) terms.push(filters.playerName);
+  if (filters.team) terms.push(filters.team);
+  if (filters.rookie) terms.push('rookie');
+  if (filters.autographed) terms.push('autograph');
+  if (filters.memorabilia) terms.push('patch');
+  return terms.filter(Boolean).map((value) => compactWhitespace(value)).filter(Boolean);
 }
 
 export function buildNegativeClauses(filters: SearchForm): string[] {
