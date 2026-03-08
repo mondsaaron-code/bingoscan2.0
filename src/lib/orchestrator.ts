@@ -34,6 +34,8 @@ import {
   normalizeTitleFingerprint,
   scoreListingPriority,
   scoreSellerListingQuality,
+  shouldRejectLowTrustListing,
+  shouldSkipWeakTail,
   tokenSimilarity,
   tokenizeLoose,
 } from '@/lib/utils';
@@ -42,6 +44,7 @@ import type { SearchForm, ScanSummary } from '@/types/app';
 const TARGET_RESULTS = 10;
 const FETCH_PAGE_SIZE = 40;
 const MAX_CANDIDATES_PER_TICK = 3;
+const MIN_CANDIDATES_PER_TICK = 1;
 const AUTO_ACCEPT_CONFIDENCE = 90;
 const BAD_LOGIC_CACHE_TTL_MS = 2 * 60 * 1000;
 const MAX_EXACT_FAMILY_RESULTS = 1;
@@ -102,8 +105,21 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   );
 
   let processed = 0;
-  for (const { listing } of prioritizedListings) {
-    if (processed >= MAX_CANDIDATES_PER_TICK) break;
+  const tickBudget = getTickBudget(currentResults, scan.metrics.dealsFound);
+  for (const { listing, score } of prioritizedListings) {
+    if (processed >= tickBudget) break;
+
+    const weakTailReason = shouldSkipWeakTail({
+      currentResults,
+      dealsFound: scan.metrics.dealsFound,
+      listingPriorityScore: score,
+    });
+    if (weakTailReason) {
+      await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+      await addScanEvent(scanId, 'info', 'filtering', weakTailReason, `${listing.title}
+Priority ${score}`);
+      continue;
+    }
     const dedupeAllowed = await upsertDedupeItem(listing.itemId);
     if (!dedupeAllowed) {
       await appendMetrics(scanId, { candidatesFilteredOut: 1 });
@@ -169,14 +185,35 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
   }
 
   const details = await getEbayDetailsWithLogging(scanId, listing);
+  const aspectCount = Object.values(details?.aspectMap ?? {}).reduce((sum, values) => sum + values.length, 0);
+  const imageCount = [listing.imageUrl, ...(details?.imageUrls ?? [])].filter(Boolean).length;
   const listingQuality = scoreSellerListingQuality({
     sellerFeedbackPercentage: details?.sellerFeedbackPercentage ?? null,
     sellerFeedbackScore: details?.sellerFeedbackScore ?? null,
-    imageCount: [listing.imageUrl, ...(details?.imageUrls ?? [])].filter(Boolean).length,
+    imageCount,
     description: details?.description ?? null,
     aspectMap: details?.aspectMap ?? null,
     condition: details?.condition ?? listing.condition ?? null,
   });
+  const lowTrustReason = shouldRejectLowTrustListing({
+    score: listingQuality.score,
+    sellerFeedbackPercentage: details?.sellerFeedbackPercentage ?? null,
+    sellerFeedbackScore: details?.sellerFeedbackScore ?? null,
+    imageCount,
+    aspectCount,
+    description: details?.description ?? null,
+    title: listing.title,
+    subtitle: details?.subtitle ?? null,
+    filters,
+  });
+  if (lowTrustReason) {
+    await updateCandidate(candidateId, { stage: 'filtered_out', rejection_reason: lowTrustReason });
+    await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+    await addScanEvent(scanId, 'info', 'filtering', lowTrustReason, `${listing.title}
+${listingQuality.summary}`);
+    return;
+  }
+
   if (details) {
     const detailRejection = shouldRejectListingDetails(details, filters);
     if (detailRejection) {
@@ -767,4 +804,11 @@ function extractCardNumberToken(value: string): string | null {
     if (/\d/.test(normalized)) return normalized.toLowerCase();
   }
   return null;
+}
+
+
+function getTickBudget(currentResults: number, dealsFound: number): number {
+  if (currentResults >= 9 && dealsFound >= 6) return MIN_CANDIDATES_PER_TICK;
+  if (currentResults >= 8 && dealsFound >= 5) return 2;
+  return MAX_CANDIDATES_PER_TICK;
 }

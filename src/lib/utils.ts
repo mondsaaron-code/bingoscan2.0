@@ -279,12 +279,6 @@ export function determineGradingLane(args: {
   const rawProfit = args.scpUngradedSell !== null && args.scpUngradedSell !== undefined ? args.scpUngradedSell - args.totalPurchasePrice : null;
   const grade9Upside = args.scpGrade9 !== null && args.scpGrade9 !== undefined ? args.scpGrade9 - args.totalPurchasePrice : null;
   const psa10Upside = args.scpPsa10 !== null && args.scpPsa10 !== undefined ? args.scpPsa10 - args.totalPurchasePrice : null;
-  const gradingLane = determineGradingLane({
-    totalPurchasePrice: args.totalPurchasePrice,
-    scpUngradedSell: args.scpUngradedSell,
-    scpGrade9: args.scpGrade9,
-    scpPsa10: args.scpPsa10,
-  });
 
   if ((psa10Upside ?? -9999) >= 150 && (grade9Upside ?? -9999) >= 35) {
     return { label: 'Strong grading lane', detail: `PSA 10 upside ${toCurrency(psa10Upside)} with PSA 9 floor ${toCurrency(grade9Upside)}` };
@@ -299,9 +293,67 @@ export function determineGradingLane(args: {
     return { label: 'Raw flip', detail: `Ungraded spread ${toCurrency(rawProfit)}` };
   }
   if ((rawProfit ?? -9999) > 0 || (psa10Upside ?? -9999) > 25) {
-    return { label: 'Speculative', detail: `Needs cleaner grade edge` };
+    return { label: 'Speculative', detail: 'Needs cleaner grade edge' };
   }
   return { label: 'Low grading edge', detail: 'Little grading upside today' };
+}
+
+export function shouldRejectLowTrustListing(args: {
+  score: number;
+  sellerFeedbackPercentage?: number | null;
+  sellerFeedbackScore?: number | null;
+  imageCount?: number | null;
+  aspectCount?: number | null;
+  description?: string | null;
+  title: string;
+  subtitle?: string | null;
+  filters?: {
+    playerName?: string;
+    cardNumber?: string;
+    autographed?: boolean;
+    memorabilia?: boolean;
+  };
+}): string | null {
+  const imageCount = Math.max(0, Math.round(args.imageCount ?? 0));
+  const aspectCount = Math.max(0, Math.round(args.aspectCount ?? 0));
+  const descriptionLength = compactWhitespace(args.description ?? '').length;
+  const sellerPct = args.sellerFeedbackPercentage ?? null;
+  const sellerScore = args.sellerFeedbackScore ?? null;
+  const text = compactWhitespace(`${args.title} ${args.subtitle ?? ''}`.toLowerCase());
+  const ambiguousTitle = text.split(/\s+/).length < 7 || !/\b(19|20)\d{2}\b/.test(text);
+  const playerRequested = compactWhitespace((args.filters?.playerName ?? '').toLowerCase());
+  const playerMissing = Boolean(playerRequested) && !text.includes(playerRequested);
+  const cardRequested = compactWhitespace((args.filters?.cardNumber ?? '').toLowerCase()).replace(/[^a-z0-9]+/g, '');
+  const cardMissing = Boolean(cardRequested) && !text.replace(/[^a-z0-9#]+/g, '').includes(cardRequested);
+  const premiumFlags = Boolean(args.filters?.autographed || args.filters?.memorabilia);
+
+  if (args.score <= 18) {
+    return 'Low-trust listing: seller and listing quality are too weak';
+  }
+  if ((sellerPct !== null && sellerPct < 96.5) && (sellerScore !== null && sellerScore < 50) && args.score < 35) {
+    return `Low-trust seller: ${sellerPct.toFixed(1)}% feedback with limited history`;
+  }
+  if (imageCount <= 1 && aspectCount <= 1 && descriptionLength < 40 && args.score < 42) {
+    return 'Low-trust listing: too little evidence (photos/specifics/description)';
+  }
+  if ((playerMissing || cardMissing || ambiguousTitle || premiumFlags) && imageCount <= 1 && aspectCount <= 2 && args.score < 48) {
+    return 'Low-trust listing: not enough evidence for this card type';
+  }
+  return null;
+}
+
+export function shouldSkipWeakTail(args: {
+  currentResults: number;
+  dealsFound: number;
+  listingPriorityScore: number;
+}): string | null {
+  if (args.currentResults >= 9 && args.dealsFound >= 6 && args.listingPriorityScore < 52) {
+    return 'Skipped weak-tail candidate because the scan already has a strong queue';
+  }
+  if (args.currentResults >= 8 && args.dealsFound >= 5 && args.listingPriorityScore < 42) {
+    return 'Skipped weak-tail candidate because the scan already has enough stronger listings queued';
+  }
+  return null;
 }
 
 export function scoreDealOpportunity(args: {
