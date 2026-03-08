@@ -41,6 +41,12 @@ type TitleOutcomeMemoryDbRow = {
   disposition: Disposition;
 };
 
+type FamilyOutcomeMemoryDbRow = {
+  ebayTitle: string;
+  scpProductName: string | null;
+  disposition: Disposition;
+};
+
 export type SellerOutcomeMemory = {
   sellerUsername: string;
   total: number;
@@ -345,6 +351,24 @@ export async function getRecentTitleOutcomeMemory(limit = 400): Promise<TitleOut
       disposition: row.disposition as Disposition,
     }));
 }
+
+export async function getRecentFamilyOutcomeMemory(limit = 500): Promise<FamilyOutcomeMemoryDbRow[]> {
+  const { data, error } = await getSupabase()
+    .from('scan_results')
+    .select('ebay_title, scp_product_name, disposition')
+    .not('disposition', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return ((data ?? []) as Array<Record<string, unknown>>)
+    .filter((row) => row.ebay_title && row.disposition)
+    .map((row) => ({
+      ebayTitle: String(row.ebay_title),
+      scpProductName: row.scp_product_name ? String(row.scp_product_name) : null,
+      disposition: row.disposition as Disposition,
+    }));
+}
+
 
 export async function getSellerOutcomeMemory(sellerUsername: string, limit = 120): Promise<SellerOutcomeMemory | null> {
   const normalizedSeller = normalizeSellerUsername(sellerUsername);

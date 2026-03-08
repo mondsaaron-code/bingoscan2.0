@@ -542,6 +542,17 @@ export type TitleOutcomeMemory = {
   tokenWeights: Map<string, number>;
 };
 
+export type FamilyOutcomeMemoryRow = {
+  ebayTitle: string;
+  scpProductName?: string | null;
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic';
+};
+
+export type FamilyOutcomeMemory = {
+  exact: Map<string, number>;
+  cluster: Map<string, number>;
+};
+
 export type SellerOutcomeSummary = {
   sellerUsername: string;
   total: number;
@@ -609,6 +620,55 @@ export function scoreListingAgainstTitleMemory(title: string, memory: TitleOutco
   if (total >= 8) return { score: Math.round(total), reason: 'historical good title pattern boost' };
   if (total >= 4) return { score: Math.round(total), reason: 'historically decent title pattern' };
   return { score: Math.round(total), reason: null };
+}
+
+export function buildFamilyOutcomeMemory(rows: FamilyOutcomeMemoryRow[]): FamilyOutcomeMemory {
+  const exact = new Map<string, number>();
+  const cluster = new Map<string, number>();
+
+  for (const row of rows) {
+    const keys = buildDealDiversityKeys({
+      ebayTitle: row.ebayTitle,
+      scpProductName: row.scpProductName ?? null,
+    });
+    if (!keys.exactFamily && !keys.cluster) continue;
+
+    const exactWeight = row.disposition === 'purchased' ? 5 : row.disposition === 'bad_logic' ? -8 : -3;
+    const clusterWeight = row.disposition === 'purchased' ? 2 : row.disposition === 'bad_logic' ? -3 : -1;
+
+    if (keys.exactFamily) exact.set(keys.exactFamily, (exact.get(keys.exactFamily) ?? 0) + exactWeight);
+    if (keys.cluster) cluster.set(keys.cluster, (cluster.get(keys.cluster) ?? 0) + clusterWeight);
+  }
+
+  return { exact, cluster };
+}
+
+export function scoreListingAgainstFamilyMemory(
+  args: { ebayTitle: string; scpProductName?: string | null },
+  memory: FamilyOutcomeMemory | null | undefined,
+): { score: number; reason: string | null; exactFamily: string | null; cluster: string | null } {
+  const keys = buildDealDiversityKeys(args);
+  if (!memory) {
+    return { score: 0, reason: null, exactFamily: keys.exactFamily || null, cluster: keys.cluster || null };
+  }
+
+  const exactScore = keys.exactFamily ? (memory.exact.get(keys.exactFamily) ?? 0) : 0;
+  const clusterScore = keys.cluster ? (memory.cluster.get(keys.cluster) ?? 0) : 0;
+  const total = Math.max(-14, Math.min(14, exactScore + clusterScore));
+
+  if (total <= -10) {
+    return { score: Math.round(total), reason: 'historically noisy set/parallel family', exactFamily: keys.exactFamily || null, cluster: keys.cluster || null };
+  }
+  if (total <= -5) {
+    return { score: Math.round(total), reason: 'mixed set/parallel family history', exactFamily: keys.exactFamily || null, cluster: keys.cluster || null };
+  }
+  if (total >= 8) {
+    return { score: Math.round(total), reason: 'historically productive set/parallel family', exactFamily: keys.exactFamily || null, cluster: keys.cluster || null };
+  }
+  if (total >= 4) {
+    return { score: Math.round(total), reason: 'decent set/parallel family history', exactFamily: keys.exactFamily || null, cluster: keys.cluster || null };
+  }
+  return { score: Math.round(total), reason: null, exactFamily: keys.exactFamily || null, cluster: keys.cluster || null };
 }
 
 export function summarizeSellerOutcomeMemory(args: {
