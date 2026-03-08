@@ -144,6 +144,23 @@ export function searchScpCsvCandidates(csvText: string, query: string, limit = 1
   return ranked.slice(0, limit);
 }
 
+export function searchScpCsvCandidatesMulti(csvText: string, queries: string[], limit = 16): ScpCandidate[] {
+  const cleanedQueries = [...new Set(queries.map((value) => compactWhitespace(value)).filter(Boolean))].slice(0, 5);
+  if (cleanedQueries.length === 0) return [];
+
+  const merged: ScpCandidate[] = [];
+  for (const query of cleanedQueries) {
+    merged.push(...searchScpCsvCandidates(csvText, query, Math.max(limit, 12)));
+  }
+
+  const deduped = dedupeCandidates(merged);
+  return [...deduped].sort((a, b) => {
+    const aScore = Math.max(...cleanedQueries.map((query) => scoreScpText(query, a)));
+    const bScore = Math.max(...cleanedQueries.map((query) => scoreScpText(query, b)));
+    return bScore - aScore;
+  }).slice(0, limit);
+}
+
 export function parseScpCsv(csvText: string): ScpCandidate[] {
   const lines = csvText.split(/\r?\n/).filter(Boolean);
   if (lines.length < 2) return [];

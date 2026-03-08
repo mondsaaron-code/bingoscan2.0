@@ -30,8 +30,8 @@ import { verifyCardMatchWithOpenAI } from '@/lib/openai';
 import {
   getSportsCardsProProduct,
   hydrateSportsCardsProCandidates,
-  searchScpCsvCandidates,
-  searchSportsCardsProCandidates,
+  searchScpCsvCandidatesMulti,
+  searchSportsCardsProCandidatesMulti,
   type ScpCandidate,
 } from '@/lib/scp';
 import { identifyWithXimilar } from '@/lib/ximilar';
@@ -262,7 +262,7 @@ async function evaluateListing(
   }
 
   const details = await getEbayDetailsWithLogging(scanId, listing);
-  const aspectCount = Object.values(details?.aspectMap ?? {}).reduce((sum, values) => sum + values.length, 0);
+  const aspectCount = Object.values(details?.aspectMap ?? {}).reduce<number>((sum, values) => sum + (Array.isArray(values) ? values.length : 0), 0);
   const imageCount = [listing.imageUrl, ...(details?.imageUrls ?? [])].filter(Boolean).length;
   const listingQuality = scoreSellerListingQuality({
     sellerFeedbackPercentage: details?.sellerFeedbackPercentage ?? null,
@@ -385,10 +385,19 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     await appendMetrics(scanId, { ximilarCalls: ximilarHints.callCount });
   }
 
-  const scpQuery = buildScpQuery(listing, details, ximilarHints?.titleHints ?? []);
-  const baseCandidates = await searchSportsCardsProCandidates(scpQuery);
-  await incrementUsage('scp', 1);
-  await appendMetrics(scanId, { scpCalls: 1 });
+  const scpQueries = buildScpQueries(listing, details, filters, ximilarHints?.titleHints ?? []);
+  const { candidates: baseCandidates, queryHits } = await searchSportsCardsProCandidatesMulti(scpQueries, 10);
+  if (queryHits.length > 0) {
+    await incrementUsage('scp', queryHits.length);
+    await appendMetrics(scanId, { scpCalls: queryHits.length });
+    await addScanEvent(
+      scanId,
+      'info',
+      'matching_scp',
+      'Ran SCP lookup queries',
+      queryHits.map((row) => `${row.query} (${row.count})`).join('\n'),
+    );
+  }
 
   let candidatePool = [...baseCandidates];
   const hydratedBase = await hydrateSportsCardsProCandidates(rankScpCandidatesLocally(listing, details, filters, baseCandidates, reviewResolutionMemory, cardNumberOutcomeMemory).slice(0, 5).map((row) => row.candidate.productId));
@@ -398,17 +407,21 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     candidatePool = mergeCandidates(candidatePool, hydratedBase);
   }
 
-  const cacheHints = buildScpCacheHints(listing, details, filters, candidatePool, hydratedBase, ximilarHints?.titleHints ?? []);
-  const matchedCaches = await findScpCacheMatches(cacheHints, 3);
+  const cacheHints = buildScpCacheHints(listing, details, filters, candidatePool, hydratedBase, scpQueries, ximilarHints?.titleHints ?? []);
+  const matchedCaches = await findScpCacheMatches(cacheHints, 4);
+  if (cacheHints.length > 0) {
+    await addScanEvent(scanId, 'info', 'matching_scp', 'Inferred SCP cache targets', cacheHints.slice(0, 8).join(' • '));
+  }
   const loadedCacheNames: string[] = [];
-  for (const cacheEntry of matchedCaches.slice(0, 2)) {
+  for (const cacheEntry of matchedCaches.slice(0, 3)) {
     if (!cacheEntry.storagePath) continue;
     const cachedCsv = await getScpCacheCsvTextByStoragePath(cacheEntry.storagePath);
     if (!cachedCsv) continue;
-    const cacheCandidates = searchScpCsvCandidates(cachedCsv, scpQuery, 16);
+    const cacheQueries = buildScpCacheQueries(scpQueries, cacheEntry.consoleName, listing, details, filters);
+    const cacheCandidates = searchScpCsvCandidatesMulti(cachedCsv, cacheQueries, 18);
     if (cacheCandidates.length > 0) {
       candidatePool = mergeCandidates(candidatePool, cacheCandidates);
-      loadedCacheNames.push(cacheEntry.consoleName);
+      loadedCacheNames.push(`${cacheEntry.consoleName} (${cacheCandidates.length})`);
     }
   }
   if (loadedCacheNames.length > 0) {
@@ -683,19 +696,42 @@ function shouldUseXimilar(listing: EbayListing, details: EbayListingDetails | nu
   return !/#[a-z0-9]+/.test(lower) || lower.includes('prizm') || lower.includes('mosaic') || lower.includes('optic') || lower.includes('refractor');
 }
 
-function buildScpQuery(listing: EbayListing, details: EbayListingDetails | null, hints: string[]): string {
-  const pieces = [
-    listing.title,
-    details?.subtitle ?? '',
-    ...(details ? buildAspectHints(details.aspectMap) : []),
-    hints.join(' '),
-  ];
-  const tokens = tokenizeLoose(pieces.join(' '))
-    .filter((token) => token.length > 1)
-    .slice(0, 20);
-  return compactWhitespace(tokens.join(' '));
+function buildScpQueries(listing: EbayListing, details: EbayListingDetails | null, filters: SearchForm, hints: string[]): string[] {
+  const year = extractPrimaryYear(`${listing.title} ${details?.subtitle ?? ''}`) ?? (filters.startYear ? String(filters.startYear) : null);
+  const manufacturer = firstAspectValue(details, 'manufacturer') ?? filters.brand ?? null;
+  const setName = firstAspectValue(details, 'set', 'insert set') ?? filters.insert ?? filters.variant ?? null;
+  const parallel = firstAspectValue(details, 'parallel variety') ?? filters.variant ?? null;
+  const cardNumber = filters.cardNumber ?? firstAspectValue(details, 'card number') ?? null;
+  const player = filters.playerName ?? firstAspectValue(details, 'athlete', 'player/athlete') ?? null;
+  const premiumFlags = [filters.rookie ? 'rookie' : '', filters.autographed ? 'autograph' : '', filters.memorabilia ? 'memorabilia' : ''].filter(Boolean).join(' ');
+  const inferredConsoles = inferConsoleCandidatesFromListing(listing, details, filters);
+
+  const queries = new Set<string>();
+  for (const consoleName of inferredConsoles.slice(0, 4)) {
+    queries.add(compactWhitespace([consoleName, player ?? '', cardNumber ? `#${cardNumber}` : '', premiumFlags].filter(Boolean).join(' ')));
+  }
+  queries.add(compactWhitespace([year ?? '', manufacturer ?? '', setName ?? '', player ?? '', cardNumber ? `#${cardNumber}` : '', parallel ?? '', premiumFlags].filter(Boolean).join(' ')));
+  queries.add(compactWhitespace([year ?? '', manufacturer ?? '', player ?? '', cardNumber ? `#${cardNumber}` : '', filters.insert ?? '', parallel ?? ''].filter(Boolean).join(' ')));
+  queries.add(compactWhitespace([listing.title, details?.subtitle ?? '', ...(details ? buildAspectHints(details.aspectMap) : []), hints.join(' ')].join(' ')));
+
+  return [...queries]
+    .map((value) => compactWhitespace(tokenizeLoose(value).filter((token) => token.length > 1).slice(0, 20).join(' ')))
+    .filter(Boolean)
+    .slice(0, 5);
 }
 
+function buildScpCacheQueries(baseQueries: string[], consoleName: string, listing: EbayListing, details: EbayListingDetails | null, filters: SearchForm): string[] {
+  const year = extractPrimaryYear(`${listing.title} ${details?.subtitle ?? ''}`) ?? (filters.startYear ? String(filters.startYear) : null);
+  const manufacturer = firstAspectValue(details, 'manufacturer') ?? filters.brand ?? null;
+  const setName = firstAspectValue(details, 'set', 'insert set') ?? filters.insert ?? filters.variant ?? null;
+  const cardNumber = filters.cardNumber ?? firstAspectValue(details, 'card number') ?? null;
+  const player = filters.playerName ?? firstAspectValue(details, 'athlete', 'player/athlete') ?? null;
+  const queries = new Set<string>(baseQueries);
+  queries.add(consoleName);
+  queries.add(compactWhitespace([consoleName, player ?? '', cardNumber ? `#${cardNumber}` : ''].filter(Boolean).join(' ')));
+  queries.add(compactWhitespace([year ?? '', manufacturer ?? '', setName ?? '', player ?? '', cardNumber ? `#${cardNumber}` : ''].filter(Boolean).join(' ')));
+  return [...queries].filter(Boolean).slice(0, 6);
+}
 
 function buildScpCacheHints(
   listing: EbayListing,
@@ -703,16 +739,23 @@ function buildScpCacheHints(
   filters: SearchForm,
   candidatePool: ScpCandidate[],
   hydratedBase: ScpCandidate[],
+  scpQueries: string[],
   ximilarHints: string[],
 ): string[] {
   const hints = new Set<string>();
-  const inferredConsole = inferConsoleFromListing(listing, details, filters);
-  if (inferredConsole) hints.add(inferredConsole);
+
+  for (const inferred of inferConsoleCandidatesFromListing(listing, details, filters)) {
+    hints.add(inferred);
+  }
 
   const fromFilters = inferConsoleFromFilters(filters);
   if (fromFilters) hints.add(fromFilters);
 
-  for (const candidate of [...hydratedBase, ...candidatePool].slice(0, 8)) {
+  for (const query of scpQueries.slice(0, 4)) {
+    hints.add(query);
+  }
+
+  for (const candidate of [...hydratedBase, ...candidatePool].slice(0, 10)) {
     if (candidate.consoleName) hints.add(candidate.consoleName);
   }
 
@@ -823,13 +866,38 @@ function scoreCandidate(
   return score;
 }
 
-function inferConsoleFromListing(listing: EbayListing, details: EbayListingDetails | null, filters?: SearchForm): string | null {
-  const setValue = details?.aspectMap.set?.[0] ?? details?.aspectMap['insert set']?.[0] ?? filters?.variant ?? filters?.insert ?? null;
-  const manufacturer = details?.aspectMap.manufacturer?.[0] ?? filters?.brand ?? null;
+function inferConsoleCandidatesFromListing(listing: EbayListing, details: EbayListingDetails | null, filters?: SearchForm): string[] {
+  const setValue = firstAspectValue(details, 'set', 'insert set') ?? filters?.insert ?? filters?.variant ?? null;
+  const manufacturer = firstAspectValue(details, 'manufacturer') ?? filters?.brand ?? null;
+  const parallel = firstAspectValue(details, 'parallel variety') ?? filters?.variant ?? null;
   const year = extractPrimaryYear(`${listing.title} ${details?.subtitle ?? ''}`) ?? (filters?.startYear ? String(filters.startYear) : null);
   const sportPrefix = filters?.sport ? `${filters.sport} cards` : listing.title.toLowerCase().includes('football') ? 'football cards' : '';
-  if (!manufacturer || !setValue || !year) return null;
-  return `${sportPrefix} ${year} ${manufacturer} ${setValue}`.replace(/\s+/g, ' ').trim();
+  const values = new Set<string>();
+
+  if (manufacturer && setValue && year) {
+    values.add(compactWhitespace(`${sportPrefix} ${year} ${manufacturer} ${setValue}`));
+    values.add(compactWhitespace(`${year} ${manufacturer} ${setValue}`));
+  }
+  if (manufacturer && setValue && year && parallel && !setValue.toLowerCase().includes(parallel.toLowerCase())) {
+    values.add(compactWhitespace(`${sportPrefix} ${year} ${manufacturer} ${setValue} ${parallel}`));
+    values.add(compactWhitespace(`${year} ${manufacturer} ${setValue} ${parallel}`));
+  }
+  if (manufacturer && parallel && year) {
+    values.add(compactWhitespace(`${sportPrefix} ${year} ${manufacturer} ${parallel}`));
+  }
+  if (manufacturer && setValue) {
+    values.add(compactWhitespace(`${manufacturer} ${setValue}`));
+  }
+  return [...values].filter(Boolean);
+}
+
+function firstAspectValue(details: EbayListingDetails | null, ...keys: string[]): string | null {
+  if (!details) return null;
+  for (const key of keys) {
+    const value = details.aspectMap[key]?.[0];
+    if (value) return value;
+  }
+  return null;
 }
 
 function mergeCandidates(...groups: ScpCandidate[][]): ScpCandidate[] {

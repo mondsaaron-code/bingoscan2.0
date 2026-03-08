@@ -1,6 +1,6 @@
 import { createSupabaseAdminClient } from '@/lib/supabase';
 import { getOpenAiTodayCostUsd } from '@/lib/openai-admin';
-import { normalizeSellerUsername, normalizeTitleFingerprint, safeJsonParse, slugify, summarizeSellerOutcomeMemory, tokenizeLoose } from '@/lib/utils';
+import { compactWhitespace, normalizeSellerUsername, normalizeTitleFingerprint, safeJsonParse, slugify, summarizeSellerOutcomeMemory, tokenizeLoose } from '@/lib/utils';
 import type {
   DashboardSnapshot,
   Disposition,
@@ -150,7 +150,10 @@ function buildProviderLimitStatuses(row: Partial<UsageRow> | null | undefined): 
 }
 
 function scoreScpCacheEntry(entry: ScpCacheEntry, hints: string[]): number {
-  const haystack = `${entry.consoleName} ${entry.cacheKey} ${entry.sourceConsoleUrl ?? ''}`.toLowerCase();
+  const entryAliases = [entry.consoleName, entry.cacheKey.replace(/\.csv$/i, ''), entry.sourceConsoleUrl ?? ''].filter(Boolean);
+  const haystack = entryAliases.join(' ').toLowerCase();
+  const normalizedEntryAliases = entryAliases.map(normalizeScpCacheAlias).filter(Boolean);
+  const entryYear = extractYearToken(haystack);
   let score = 0;
   const tokenSet = new Set<string>();
 
@@ -164,11 +167,57 @@ function scoreScpCacheEntry(entry: ScpCacheEntry, hints: string[]): number {
     if (haystack.includes(token)) score += /^\d{4}$/.test(token) ? 10 : 4;
   }
 
+  for (const hint of hints) {
+    const normalizedHint = normalizeScpCacheAlias(hint);
+    if (!normalizedHint) continue;
+    if (normalizedEntryAliases.includes(normalizedHint)) {
+      score += 34;
+      continue;
+    }
+    for (const alias of normalizedEntryAliases) {
+      if (!alias) continue;
+      if (alias.includes(normalizedHint) || normalizedHint.includes(alias)) {
+        score += 18;
+      }
+      const overlap = countSharedTokens(alias, normalizedHint);
+      if (overlap >= 4) score += 14;
+      else if (overlap >= 3) score += 9;
+      else if (overlap >= 2) score += 5;
+    }
+
+    const hintYear = extractYearToken(hint);
+    if (entryYear && hintYear && entryYear === hintYear) score += 8;
+    if (entryYear && hintYear && entryYear !== hintYear) score -= 10;
+  }
+
   const joinedHints = hints.join(' ').toLowerCase();
   if (joinedHints && haystack.includes(joinedHints)) score += 16;
   if (entry.consoleName && hints.some((hint) => slugify(hint) === slugify(entry.consoleName))) score += 20;
   if (entry.sourceConsoleUrl && hints.some((hint) => entry.sourceConsoleUrl?.toLowerCase().includes(slugify(hint)))) score += 6;
   return score;
+}
+
+function normalizeScpCacheAlias(value: string): string {
+  const stop = new Set(['sports', 'trading', 'card', 'cards', 'set', 'sets', 'the', 'and', 'edition']);
+  return tokenizeLoose(compactWhitespace(value)
+    .replace(/https?:\/\/[^/]+\//gi, ' ')
+    .replace(/\.csv$/i, ' ')
+    .replace(/[-_/]+/g, ' '))
+    .filter((token) => token.length > 1 && !stop.has(token))
+    .join(' ');
+}
+
+function extractYearToken(value: string): string | null {
+  return value.match(/(19|20)\d{2}/)?.[0] ?? null;
+}
+
+function countSharedTokens(left: string, right: string): number {
+  const leftTokens = new Set(tokenizeLoose(left).filter((token) => token.length > 2));
+  let count = 0;
+  for (const token of tokenizeLoose(right)) {
+    if (token.length > 2 && leftTokens.has(token)) count += 1;
+  }
+  return count;
 }
 
 export async function getActiveScan(): Promise<ScanSummary | null> {
