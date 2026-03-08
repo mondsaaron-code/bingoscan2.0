@@ -7,6 +7,7 @@ import {
   getManualMatchOverride,
   getRecentBadLogicPatterns,
   getRecentFamilyOutcomeMemory,
+  getRecentReviewResolutionMemory,
   getRecentTitleOutcomeMemory,
   getScanById,
   getScanResultMemory,
@@ -33,12 +34,14 @@ import { identifyWithXimilar } from '@/lib/ximilar';
 import {
   buildDealDiversityKeys,
   buildFamilyOutcomeMemory,
+  buildReviewResolutionMemory,
   buildTitleOutcomeMemory,
   compactWhitespace,
   determineGradingLane,
   normalizeSellerUsername,
   normalizeTitleFingerprint,
   scoreListingAgainstFamilyMemory,
+  scoreScpCandidateAgainstReviewMemory,
   scoreListingAgainstTitleMemory,
   scoreListingPriority,
   scoreSellerListingQuality,
@@ -58,12 +61,14 @@ const BAD_LOGIC_CACHE_TTL_MS = 2 * 60 * 1000;
 const TITLE_OUTCOME_CACHE_TTL_MS = 2 * 60 * 1000;
 const SELLER_OUTCOME_CACHE_TTL_MS = 10 * 60 * 1000;
 const FAMILY_OUTCOME_CACHE_TTL_MS = 2 * 60 * 1000;
+const REVIEW_RESOLUTION_CACHE_TTL_MS = 2 * 60 * 1000;
 const MAX_EXACT_FAMILY_RESULTS = 1;
 const MAX_CLUSTER_RESULTS = 2;
 
 let badLogicCache: { loadedAt: number; rows: Array<{ ebayTitle: string; fingerprint: string; createdAt: string; reasoning: string | null }> } | null = null;
 let titleOutcomeMemoryCache: { loadedAt: number; memory: ReturnType<typeof buildTitleOutcomeMemory> } | null = null;
 let familyOutcomeMemoryCache: { loadedAt: number; memory: ReturnType<typeof buildFamilyOutcomeMemory> } | null = null;
+let reviewResolutionMemoryCache: { loadedAt: number; memory: ReturnType<typeof buildReviewResolutionMemory> } | null = null;
 const sellerOutcomeCache = new Map<string, { loadedAt: number; value: Awaited<ReturnType<typeof getSellerOutcomeMemory>> }>();
 
 export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
@@ -108,6 +113,7 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   const existingResultMemory = await getScanResultMemory(scanId);
   const titleOutcomeMemory = await getTitleOutcomeMemoryCached();
   const familyOutcomeMemory = await getFamilyOutcomeMemoryCached();
+  const reviewResolutionMemory = await getReviewResolutionMemoryCached();
   const prioritizedListings = prioritizeListingsForScan(listings, scan.filters, existingResultMemory, titleOutcomeMemory, familyOutcomeMemory);
   await addScanEvent(
     scanId,
@@ -175,7 +181,7 @@ Priority ${score}`);
     }
 
     try {
-      await evaluateListing(scanId, candidateId, listing, scan.filters, titleOutcomeMemory, familyOutcomeMemory);
+      await evaluateListing(scanId, candidateId, listing, scan.filters, titleOutcomeMemory, familyOutcomeMemory, reviewResolutionMemory);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown candidate evaluation error';
       await updateCandidate(candidateId, { stage: 'error', rejection_reason: message });
@@ -203,6 +209,7 @@ async function evaluateListing(
   filters: SearchForm,
   titleOutcomeMemory: ReturnType<typeof buildTitleOutcomeMemory>,
   familyOutcomeMemory: ReturnType<typeof buildFamilyOutcomeMemory>,
+  reviewResolutionMemory: ReturnType<typeof buildReviewResolutionMemory>,
 ): Promise<void> {
   await markScanStatus(scanId, 'matching_scp', 'Inspecting listing and matching SportsCardsPro candidates');
   await updateCandidate(candidateId, { stage: 'matching_scp' });
@@ -332,7 +339,7 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
   await appendMetrics(scanId, { scpCalls: 1 });
 
   let candidatePool = [...baseCandidates];
-  const hydratedBase = await hydrateSportsCardsProCandidates(rankScpCandidatesLocally(listing, details, baseCandidates).slice(0, 5).map((row) => row.productId));
+  const hydratedBase = await hydrateSportsCardsProCandidates(rankScpCandidatesLocally(listing, details, baseCandidates, reviewResolutionMemory).slice(0, 5).map((row) => row.candidate.productId));
   if (hydratedBase.length > 0) {
     await incrementUsage('scp', hydratedBase.length);
     await appendMetrics(scanId, { scpCalls: hydratedBase.length });
@@ -412,7 +419,18 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
   }
 
   await markScanStatus(scanId, 'ai_verifying', 'Verifying exact match with OpenAI');
-  const rankedCandidates = rankScpCandidatesLocally(listing, details, candidatePool).slice(0, 5);
+  const rankedCandidateRows = rankScpCandidatesLocally(listing, details, candidatePool, reviewResolutionMemory);
+  const reviewSignals = rankedCandidateRows
+    .filter((row) => row.reviewMemory.score >= 5 || row.reviewMemory.score <= -5)
+    .slice(0, 3)
+    .map((row) => `${row.candidate.productName} (${row.reviewMemory.score > 0 ? '+' : ''}${row.reviewMemory.score})${row.reviewMemory.reason ? ` • ${row.reviewMemory.reason}` : ''}`);
+  if (reviewSignals.length > 0) {
+    await addScanEvent(scanId, 'info', 'ai_verifying', 'Applied manual-review memory to SCP candidate ranking', reviewSignals.join('\n'));
+  }
+  const rankedCandidates = rankedCandidateRows
+    .filter((row, index) => !(row.reviewMemory.score <= -10 && index > 0))
+    .slice(0, 5)
+    .map((row) => row.candidate);
   const decision = await verifyCardMatchWithOpenAI(listing, rankedCandidates, {
     ximilarHints: ximilarHints?.titleHints ?? [],
     details,
@@ -658,12 +676,36 @@ function buildAspectHints(aspects: Record<string, string[]>): string[] {
   return keys.flatMap((key) => aspects[key] ?? []).slice(0, 10);
 }
 
-function rankScpCandidatesLocally(listing: EbayListing, details: EbayListingDetails | null, candidates: ScpCandidate[]): ScpCandidate[] {
-  const fingerprint = normalizeTitleFingerprint(`${listing.title} ${details?.subtitle ?? ''}`);
-  return [...candidates].sort((a, b) => scoreCandidate(fingerprint, listing, details, b) - scoreCandidate(fingerprint, listing, details, a));
+function rankScpCandidatesLocally(
+  listing: EbayListing,
+  details: EbayListingDetails | null,
+  candidates: ScpCandidate[],
+  reviewResolutionMemory?: ReturnType<typeof buildReviewResolutionMemory>,
+): Array<{ candidate: ScpCandidate; score: number; reviewMemory: ReturnType<typeof scoreScpCandidateAgainstReviewMemory> }> {
+  const sourceTitle = `${listing.title} ${details?.subtitle ?? ''}`.trim();
+  const fingerprint = normalizeTitleFingerprint(sourceTitle);
+  return [...candidates]
+    .map((candidate) => {
+      const reviewMemory = scoreScpCandidateAgainstReviewMemory(
+        { ebayTitle: sourceTitle, candidateProductId: candidate.productId, candidateProductName: candidate.productName },
+        reviewResolutionMemory,
+      );
+      return {
+        candidate,
+        score: scoreCandidate(fingerprint, listing, details, candidate, reviewMemory.score),
+        reviewMemory,
+      };
+    })
+    .sort((a, b) => b.score - a.score);
 }
 
-function scoreCandidate(fingerprint: string, listing: EbayListing, details: EbayListingDetails | null, candidate: ScpCandidate): number {
+function scoreCandidate(
+  fingerprint: string,
+  listing: EbayListing,
+  details: EbayListingDetails | null,
+  candidate: ScpCandidate,
+  reviewMemoryScore = 0,
+): number {
   const haystack = `${candidate.productName} ${candidate.consoleName ?? ''}`.toLowerCase();
   let score = 0;
 
@@ -694,6 +736,7 @@ function scoreCandidate(fingerprint: string, listing: EbayListing, details: Ebay
   }
 
   if (listing.condition?.toLowerCase().includes('graded') && /psa|bgs|sgc|graded/i.test(candidate.productName)) score += 3;
+  score += reviewMemoryScore;
   return score;
 }
 
@@ -888,6 +931,16 @@ async function getFamilyOutcomeMemoryCached(): Promise<ReturnType<typeof buildFa
   const rows = await getRecentFamilyOutcomeMemory(500);
   const memory = buildFamilyOutcomeMemory(rows);
   familyOutcomeMemoryCache = { loadedAt: Date.now(), memory };
+  return memory;
+}
+
+async function getReviewResolutionMemoryCached(): Promise<ReturnType<typeof buildReviewResolutionMemory>> {
+  if (reviewResolutionMemoryCache && Date.now() - reviewResolutionMemoryCache.loadedAt < REVIEW_RESOLUTION_CACHE_TTL_MS) {
+    return reviewResolutionMemoryCache.memory;
+  }
+  const rows = await getRecentReviewResolutionMemory(140);
+  const memory = buildReviewResolutionMemory(rows);
+  reviewResolutionMemoryCache = { loadedAt: Date.now(), memory };
   return memory;
 }
 

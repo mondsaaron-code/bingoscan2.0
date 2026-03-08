@@ -553,6 +553,21 @@ export type FamilyOutcomeMemory = {
   cluster: Map<string, number>;
 };
 
+export type ReviewResolutionMemoryRow = {
+  ebayTitle: string;
+  selectedProductId: string;
+  selectedProductName: string;
+  optionProductId: string;
+  optionProductName: string;
+  chosen: boolean;
+};
+
+export type ReviewResolutionMemory = {
+  globalProduct: Map<string, number>;
+  familyProduct: Map<string, Map<string, number>>;
+  familyToken: Map<string, Map<string, number>>;
+};
+
 export type SellerOutcomeSummary = {
   sellerUsername: string;
   total: number;
@@ -669,6 +684,85 @@ export function scoreListingAgainstFamilyMemory(
     return { score: Math.round(total), reason: 'decent set/parallel family history', exactFamily: keys.exactFamily || null, cluster: keys.cluster || null };
   }
   return { score: Math.round(total), reason: null, exactFamily: keys.exactFamily || null, cluster: keys.cluster || null };
+}
+
+export function buildReviewResolutionMemory(rows: ReviewResolutionMemoryRow[]): ReviewResolutionMemory {
+  const globalProduct = new Map<string, number>();
+  const familyProduct = new Map<string, Map<string, number>>();
+  const familyToken = new Map<string, Map<string, number>>();
+
+  for (const row of rows) {
+    const keys = buildDealDiversityKeys({
+      ebayTitle: row.ebayTitle,
+      scpProductName: row.selectedProductName ?? row.optionProductName,
+    });
+    const familyKey = keys.cluster || keys.exactFamily || normalizeTitleFingerprint(row.ebayTitle);
+    if (!familyKey) continue;
+
+    const productWeight = row.chosen ? 7 : -5;
+    const tokenWeight = row.chosen ? 1.6 : -1.3;
+
+    globalProduct.set(row.optionProductId, (globalProduct.get(row.optionProductId) ?? 0) + (row.chosen ? 3 : -2));
+
+    if (!familyProduct.has(familyKey)) familyProduct.set(familyKey, new Map());
+    const familyProducts = familyProduct.get(familyKey)!;
+    familyProducts.set(row.optionProductId, (familyProducts.get(row.optionProductId) ?? 0) + productWeight);
+
+    const diffTokens = new Set(
+      tokenizeLoose(row.optionProductName)
+        .map((token) => token.replace(/[\[\]]/g, ''))
+        .filter((token) => token.length > 2)
+        .filter((token) => !TITLE_MEMORY_STOP_WORDS.has(token))
+    );
+
+    if (!familyToken.has(familyKey)) familyToken.set(familyKey, new Map());
+    const tokenMap = familyToken.get(familyKey)!;
+    for (const token of diffTokens) {
+      tokenMap.set(token, (tokenMap.get(token) ?? 0) + tokenWeight);
+    }
+  }
+
+  return { globalProduct, familyProduct, familyToken };
+}
+
+export function scoreScpCandidateAgainstReviewMemory(
+  args: { ebayTitle: string; candidateProductId: string; candidateProductName: string },
+  memory: ReviewResolutionMemory | null | undefined,
+): { score: number; reason: string | null; familyKey: string | null } {
+  const familyKey = buildDealDiversityKeys({
+    ebayTitle: args.ebayTitle,
+    scpProductName: args.candidateProductName,
+  }).cluster || normalizeTitleFingerprint(args.ebayTitle);
+
+  if (!memory || !familyKey) {
+    return { score: 0, reason: null, familyKey: familyKey || null };
+  }
+
+  const familyProductScore = memory.familyProduct.get(familyKey)?.get(args.candidateProductId) ?? 0;
+  const globalProductScore = memory.globalProduct.get(args.candidateProductId) ?? 0;
+
+  let tokenScore = 0;
+  const tokenMap = memory.familyToken.get(familyKey);
+  if (tokenMap) {
+    for (const token of new Set(tokenizeLoose(args.candidateProductName).map((value) => value.replace(/[\[\]]/g, '')).filter((value) => value.length > 2))) {
+      tokenScore += tokenMap.get(token) ?? 0;
+    }
+  }
+
+  const total = Math.max(-16, Math.min(16, familyProductScore + globalProductScore + Math.max(-5, Math.min(5, tokenScore))));
+  if (total <= -10) {
+    return { score: Math.round(total), reason: 'historically rejected lookalike SCP option', familyKey };
+  }
+  if (total <= -5) {
+    return { score: Math.round(total), reason: 'weak manual-review history for this SCP option family', familyKey };
+  }
+  if (total >= 10) {
+    return { score: Math.round(total), reason: 'historically selected SCP option family', familyKey };
+  }
+  if (total >= 5) {
+    return { score: Math.round(total), reason: 'positive manual-review signal for this SCP option family', familyKey };
+  }
+  return { score: Math.round(total), reason: null, familyKey };
 }
 
 export function summarizeSellerOutcomeMemory(args: {

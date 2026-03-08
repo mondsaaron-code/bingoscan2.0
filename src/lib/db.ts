@@ -47,6 +47,15 @@ type FamilyOutcomeMemoryDbRow = {
   disposition: Disposition;
 };
 
+type ReviewResolutionMemoryDbRow = {
+  ebayTitle: string;
+  selectedProductId: string;
+  selectedProductName: string;
+  optionProductId: string;
+  optionProductName: string;
+  chosen: boolean;
+};
+
 export type SellerOutcomeMemory = {
   sellerUsername: string;
   total: number;
@@ -369,6 +378,63 @@ export async function getRecentFamilyOutcomeMemory(limit = 500): Promise<FamilyO
     }));
 }
 
+
+export async function getRecentReviewResolutionMemory(limit = 120): Promise<ReviewResolutionMemoryDbRow[]> {
+  const supabase = getSupabase();
+  const { data: results, error: resultsError } = await supabase
+    .from('scan_results')
+    .select('id, ebay_title, scp_product_id, scp_product_name, needs_review')
+    .eq('needs_review', false)
+    .not('scp_product_id', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (resultsError) throw resultsError;
+
+  const resultRows = ((results ?? []) as Array<Record<string, unknown>>).filter((row) => row.id && row.ebay_title && row.scp_product_id && row.scp_product_name);
+  if (resultRows.length === 0) return [];
+
+  const resultIds = resultRows.map((row) => String(row.id));
+  const { data: options, error: optionsError } = await supabase
+    .from('scan_review_options')
+    .select('result_id, scp_product_id, scp_product_name')
+    .in('result_id', resultIds);
+  if (optionsError) throw optionsError;
+
+  const optionsByResultId = new Map<string, Array<Record<string, unknown>>>();
+  for (const option of (options ?? []) as Array<Record<string, unknown>>) {
+    const resultId = String(option.result_id ?? '');
+    if (!resultId) continue;
+    if (!optionsByResultId.has(resultId)) optionsByResultId.set(resultId, []);
+    optionsByResultId.get(resultId)!.push(option);
+  }
+
+  const memoryRows: ReviewResolutionMemoryDbRow[] = [];
+  for (const row of resultRows) {
+    const resultId = String(row.id);
+    const resultOptions = optionsByResultId.get(resultId) ?? [];
+    if (resultOptions.length === 0) continue;
+
+    const selectedProductId = String(row.scp_product_id);
+    const selectedProductName = String(row.scp_product_name);
+    const ebayTitle = String(row.ebay_title);
+
+    for (const option of resultOptions) {
+      const optionProductId = String(option.scp_product_id ?? '');
+      const optionProductName = String(option.scp_product_name ?? '');
+      if (!optionProductId || !optionProductName) continue;
+      memoryRows.push({
+        ebayTitle,
+        selectedProductId,
+        selectedProductName,
+        optionProductId,
+        optionProductName,
+        chosen: optionProductId === selectedProductId,
+      });
+    }
+  }
+
+  return memoryRows;
+}
 
 export async function getSellerOutcomeMemory(sellerUsername: string, limit = 120): Promise<SellerOutcomeMemory | null> {
   const normalizedSeller = normalizeSellerUsername(sellerUsername);
