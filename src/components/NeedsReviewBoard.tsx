@@ -1,7 +1,7 @@
 'use client';
 
 import type { Disposition, ReviewOption, ScanResultRow } from '@/types/app';
-import { formatRelativeTime, scoreDealOpportunity, summarizeDealReasons, toCurrency, toPct } from '@/lib/utils';
+import { determineGradingLane, formatRelativeTime, scoreDealOpportunity, summarizeDealReasons, toCurrency, toPct } from '@/lib/utils';
 
 export function NeedsReviewBoard({
   rows,
@@ -47,6 +47,13 @@ export function NeedsReviewBoard({
               auctionEndsAt: row.auctionEndsAt,
             });
 
+            const gradingLane = determineGradingLane({
+              totalPurchasePrice: row.totalPurchasePrice,
+              scpUngradedSell: row.scpUngradedSell,
+              scpGrade9: row.scpGrade9,
+              scpPsa10: row.scpPsa10,
+            });
+
             return (
               <div key={row.id} className="review-card">
                 <div className="review-source card">
@@ -89,6 +96,7 @@ export function NeedsReviewBoard({
                         }) || 'Compare the SCP candidates below.'}
                       </div>
                       <div className="small muted">Current placeholder match: Ungraded {toCurrency(row.scpUngradedSell)} · Grade 9 {toCurrency(row.scpGrade9)} · PSA 10 {toCurrency(row.scpPsa10)}</div>
+                      <div className="small muted">Grade lane: {gradingLane.label} — {gradingLane.detail}</div>
                       {row.reasoning ? <div className="notice"><div className="small"><strong>AI review note:</strong> {row.reasoning}</div></div> : null}
                       <div className="row-actions">
                         <button className="btn btn-ghost" onClick={() => onDisposition([row.id], 'suppress_90_days')}>Suppress 90 Days</button>
@@ -105,6 +113,13 @@ export function NeedsReviewBoard({
                     const margin = option.scpUngradedSell !== null && row.totalPurchasePrice > 0 ? ((option.scpUngradedSell - row.totalPurchasePrice) / row.totalPurchasePrice) * 100 : null;
                     const grade9Upside = option.scpGrade9 !== null ? option.scpGrade9 - row.totalPurchasePrice : null;
                     const psa10Upside = option.scpPsa10 !== null ? option.scpPsa10 - row.totalPurchasePrice : null;
+
+                    const optionLane = determineGradingLane({
+                      totalPurchasePrice: row.totalPurchasePrice,
+                      scpUngradedSell: option.scpUngradedSell,
+                      scpGrade9: option.scpGrade9,
+                      scpPsa10: option.scpPsa10,
+                    });
 
                     return (
                       <div key={option.id} className="card card-pad stack review-option-card">
@@ -134,6 +149,7 @@ export function NeedsReviewBoard({
                           </div>
                         </div>
                         <div className="small muted">Margin {toPct(margin)} · Grade 9 upside {toCurrency(grade9Upside)} · PSA 10 upside {toCurrency(psa10Upside)}</div>
+                        <div className="small muted">Grade lane: {optionLane.label} — {optionLane.detail}</div>
                         <div className="row-actions">
                           <button className="btn btn-primary" onClick={() => onResolveReview(row.id, option.id)}>Use This Match</button>
                           {option.scpLink ? <a className="btn btn-ghost" href={option.scpLink} target="_blank" rel="noreferrer">Open SCP</a> : null}

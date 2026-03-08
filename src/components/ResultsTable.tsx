@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react';
 import type { Disposition, ReviewOption, ScanResultRow } from '@/types/app';
-import { formatRelativeTime, scoreDealOpportunity, summarizeDealReasons, toCurrency, toPct } from '@/lib/utils';
+import { determineGradingLane, formatRelativeTime, scoreDealOpportunity, summarizeDealReasons, toCurrency, toPct } from '@/lib/utils';
 
 export function ResultsTable({
   title,
@@ -91,6 +91,12 @@ export function ResultsTable({
           <tbody>
             {sortedRows.map(({ row, dealScore }) => {
               const reviewOptions = reviewOptionsByResultId?.[row.id] ?? [];
+              const gradingLane = determineGradingLane({
+                totalPurchasePrice: row.totalPurchasePrice,
+                scpUngradedSell: row.scpUngradedSell,
+                scpGrade9: row.scpGrade9,
+                scpPsa10: row.scpPsa10,
+              });
               return (
                 <tr key={row.id}>
                   <td>
@@ -113,6 +119,7 @@ export function ResultsTable({
                         needsReview: row.needsReview,
                       }) || 'No strong edge yet'}
                     </div>
+                    <div className="small muted" style={{ marginTop: 4 }}>Grade lane: {gradingLane.label} — {gradingLane.detail}</div>
                     {row.reasoning ? <div className="small muted" style={{ marginTop: 4 }}>{row.reasoning}</div> : null}
                     {row.needsReview && reviewOptions.length > 0 && onResolveReview ? (
                       <div className="stack" style={{ marginTop: 10 }}>

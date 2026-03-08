@@ -30,8 +30,10 @@ import { identifyWithXimilar } from '@/lib/ximilar';
 import {
   buildDealDiversityKeys,
   compactWhitespace,
+  determineGradingLane,
   normalizeTitleFingerprint,
   scoreListingPriority,
+  scoreSellerListingQuality,
   tokenSimilarity,
   tokenizeLoose,
 } from '@/lib/utils';
@@ -167,6 +169,14 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
   }
 
   const details = await getEbayDetailsWithLogging(scanId, listing);
+  const listingQuality = scoreSellerListingQuality({
+    sellerFeedbackPercentage: details?.sellerFeedbackPercentage ?? null,
+    sellerFeedbackScore: details?.sellerFeedbackScore ?? null,
+    imageCount: [listing.imageUrl, ...(details?.imageUrls ?? [])].filter(Boolean).length,
+    description: details?.description ?? null,
+    aspectMap: details?.aspectMap ?? null,
+    condition: details?.condition ?? listing.condition ?? null,
+  });
   if (details) {
     const detailRejection = shouldRejectListingDetails(details, filters);
     if (detailRejection) {
@@ -185,6 +195,8 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
       return;
     }
   }
+
+  await addScanEvent(scanId, 'info', 'matching_scp', 'Hydrated listing quality', listingQuality.summary);
 
   const override = await getManualMatchOverride(listing.title);
   if (override) {
@@ -272,6 +284,7 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
           false,
           estimatedProfit,
           estimatedMarginPct,
+          listingQuality,
         );
         await appendMetrics(scanId, { dealsFound: 1 });
         await updateCandidate(candidateId, {
@@ -305,7 +318,12 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
       return;
     }
 
-    const resultId = await insertResultPayload(scanId, listing, null, decision, true);
+    const placeholderCandidate = rankedCandidates[0] ?? null;
+    const placeholderProfit = placeholderCandidate?.ungradedSell !== null && placeholderCandidate?.ungradedSell !== undefined
+      ? placeholderCandidate.ungradedSell - listing.total
+      : null;
+    const placeholderMargin = placeholderCandidate?.ungradedSell && placeholderProfit !== null ? (placeholderProfit / listing.total) * 100 : null;
+    const resultId = await insertResultPayload(scanId, listing, placeholderCandidate, decision, true, placeholderProfit, placeholderMargin, listingQuality);
     await insertReviewOptions(
       resultId,
       rankedCandidates.slice(0, 3).map((candidate, index) => reviewOptionPayload(candidate, index + 1, decision.confidence)),
@@ -335,7 +353,7 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
     return;
   }
 
-  await insertResultPayload(scanId, listing, chosen, decision, false, estimatedProfit, estimatedMarginPct);
+  await insertResultPayload(scanId, listing, chosen, decision, false, estimatedProfit, estimatedMarginPct, listingQuality);
   await appendMetrics(scanId, { dealsFound: 1 });
   await updateCandidate(candidateId, { stage: 'accepted', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning, scp_product_id: chosen.productId });
   await addScanEvent(scanId, 'info', 'publishing_results', 'Added deal result', `${listing.title}\nConfidence ${decision.confidence}`);
@@ -362,7 +380,18 @@ async function insertResultPayload(
   needsReview: boolean,
   estimatedProfit?: number | null,
   estimatedMarginPct?: number | null,
+  listingQuality?: { score: number; summary: string; signals: string[] } | null,
 ): Promise<string> {
+  const gradingLane = determineGradingLane({
+    totalPurchasePrice: listing.total,
+    scpUngradedSell: candidate?.ungradedSell ?? null,
+    scpGrade9: candidate?.grade9 ?? null,
+    scpPsa10: candidate?.psa10 ?? null,
+  });
+  const composedReasoning = [decision.reasoning, listingQuality?.summary, `Grade lane: ${gradingLane.label}${gradingLane.detail ? ` (${gradingLane.detail})` : ''}`]
+    .filter(Boolean)
+    .join(' • ');
+
   return insertResult({
     scan_id: scanId,
     ebay_item_id: listing.itemId,
@@ -383,7 +412,7 @@ async function insertResultPayload(
     estimated_margin_pct: estimatedMarginPct ?? null,
     ai_confidence: decision.confidence,
     needs_review: needsReview,
-    reasoning: decision.reasoning,
+    reasoning: composedReasoning,
   });
 }
 

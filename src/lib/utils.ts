@@ -201,6 +201,109 @@ export function scoreListingPriority(args: {
   return Math.max(0, Math.min(100, Math.round(score)));
 }
 
+
+export function scoreSellerListingQuality(args: {
+  sellerFeedbackPercentage?: number | null;
+  sellerFeedbackScore?: number | null;
+  imageCount?: number | null;
+  description?: string | null;
+  aspectMap?: Record<string, string[]> | null;
+  condition?: string | null;
+}): { score: number; summary: string; signals: string[] } {
+  let score = 50;
+  const signals: string[] = [];
+
+  const feedbackPct = args.sellerFeedbackPercentage ?? null;
+  if (feedbackPct !== null) {
+    if (feedbackPct >= 99.8) score += 18;
+    else if (feedbackPct >= 99.3) score += 14;
+    else if (feedbackPct >= 98.8) score += 10;
+    else if (feedbackPct >= 98) score += 4;
+    else if (feedbackPct < 97) score -= 18;
+    else if (feedbackPct < 98) score -= 10;
+    signals.push(`seller ${feedbackPct.toFixed(1)}%`);
+  } else {
+    score -= 4;
+  }
+
+  const feedbackScore = args.sellerFeedbackScore ?? null;
+  if (feedbackScore !== null) {
+    if (feedbackScore >= 5000) score += 12;
+    else if (feedbackScore >= 1000) score += 8;
+    else if (feedbackScore >= 250) score += 4;
+    else if (feedbackScore < 25) score -= 8;
+    else if (feedbackScore < 100) score -= 4;
+    signals.push(`${Math.round(feedbackScore)} fb`);
+  }
+
+  const imageCount = Math.max(0, Math.round(args.imageCount ?? 0));
+  if (imageCount >= 5) score += 10;
+  else if (imageCount >= 3) score += 6;
+  else if (imageCount >= 2) score += 2;
+  else if (imageCount === 1) score -= 4;
+  else score -= 12;
+  if (imageCount > 0) signals.push(`${imageCount} photo${imageCount === 1 ? '' : 's'}`);
+
+  const aspectCount = Object.values(args.aspectMap ?? {}).reduce((sum, values) => sum + values.length, 0);
+  if (aspectCount >= 8) score += 10;
+  else if (aspectCount >= 5) score += 6;
+  else if (aspectCount >= 3) score += 2;
+  else if (aspectCount === 0) score -= 6;
+  if (aspectCount > 0) signals.push(`${aspectCount} specifics`);
+
+  const descriptionLength = compactWhitespace(args.description ?? '').length;
+  if (descriptionLength >= 350) score += 6;
+  else if (descriptionLength >= 120) score += 3;
+  else if (descriptionLength === 0) score -= 6;
+  if (descriptionLength >= 40) signals.push('has description');
+
+  const condition = (args.condition ?? '').toLowerCase();
+  if (/near mint|excellent|ungraded|raw|psa|bgs|sgc|cgc|graded/.test(condition)) {
+    score += 2;
+  }
+
+  const normalizedScore = Math.max(0, Math.min(100, Math.round(score)));
+  return {
+    score: normalizedScore,
+    summary: `Listing ${normalizedScore}/100${signals.length ? ` • ${signals.join(' • ')}` : ''}`,
+    signals,
+  };
+}
+
+export function determineGradingLane(args: {
+  totalPurchasePrice: number;
+  scpUngradedSell?: number | null;
+  scpGrade9?: number | null;
+  scpPsa10?: number | null;
+}): { label: string; detail: string } {
+  const rawProfit = args.scpUngradedSell !== null && args.scpUngradedSell !== undefined ? args.scpUngradedSell - args.totalPurchasePrice : null;
+  const grade9Upside = args.scpGrade9 !== null && args.scpGrade9 !== undefined ? args.scpGrade9 - args.totalPurchasePrice : null;
+  const psa10Upside = args.scpPsa10 !== null && args.scpPsa10 !== undefined ? args.scpPsa10 - args.totalPurchasePrice : null;
+  const gradingLane = determineGradingLane({
+    totalPurchasePrice: args.totalPurchasePrice,
+    scpUngradedSell: args.scpUngradedSell,
+    scpGrade9: args.scpGrade9,
+    scpPsa10: args.scpPsa10,
+  });
+
+  if ((psa10Upside ?? -9999) >= 150 && (grade9Upside ?? -9999) >= 35) {
+    return { label: 'Strong grading lane', detail: `PSA 10 upside ${toCurrency(psa10Upside)} with PSA 9 floor ${toCurrency(grade9Upside)}` };
+  }
+  if ((psa10Upside ?? -9999) >= 90) {
+    return { label: 'PSA 10 swing', detail: `PSA 10 upside ${toCurrency(psa10Upside)}` };
+  }
+  if ((grade9Upside ?? -9999) >= 35) {
+    return { label: 'PSA 9 live', detail: `PSA 9 upside ${toCurrency(grade9Upside)}` };
+  }
+  if ((rawProfit ?? -9999) >= 25) {
+    return { label: 'Raw flip', detail: `Ungraded spread ${toCurrency(rawProfit)}` };
+  }
+  if ((rawProfit ?? -9999) > 0 || (psa10Upside ?? -9999) > 25) {
+    return { label: 'Speculative', detail: `Needs cleaner grade edge` };
+  }
+  return { label: 'Low grading edge', detail: 'Little grading upside today' };
+}
+
 export function scoreDealOpportunity(args: {
   estimatedProfit?: number | null;
   estimatedMarginPct?: number | null;
@@ -218,6 +321,12 @@ export function scoreDealOpportunity(args: {
   const confidence = args.aiConfidence ?? null;
   const grade9Upside = args.scpGrade9 !== null && args.scpGrade9 !== undefined ? args.scpGrade9 - args.totalPurchasePrice : null;
   const psa10Upside = args.scpPsa10 !== null && args.scpPsa10 !== undefined ? args.scpPsa10 - args.totalPurchasePrice : null;
+  const gradingLane = determineGradingLane({
+    totalPurchasePrice: args.totalPurchasePrice,
+    scpUngradedSell: args.scpUngradedSell,
+    scpGrade9: args.scpGrade9,
+    scpPsa10: args.scpPsa10,
+  });
 
   if (profit !== null) {
     if (profit >= 150) score += 28;
@@ -238,6 +347,10 @@ export function scoreDealOpportunity(args: {
   if (confidence !== null) score += Math.max(0, Math.min(20, (confidence - 70) * 0.65));
   if (grade9Upside !== null && grade9Upside > 20) score += Math.min(10, grade9Upside / 20);
   if (psa10Upside !== null && psa10Upside > 40) score += Math.min(16, psa10Upside / 25);
+  if (gradingLane.label === 'Strong grading lane') score += 8;
+  else if (gradingLane.label === 'PSA 10 swing') score += 5;
+  else if (gradingLane.label === 'PSA 9 live') score += 3;
+  else if (gradingLane.label === 'Low grading edge') score -= 4;
   if (args.needsReview) score -= 10;
 
   if (args.auctionEndsAt) {
@@ -324,6 +437,12 @@ export function summarizeDealReasons(args: {
   const confidence = args.aiConfidence ?? null;
   const grade9Upside = args.scpGrade9 !== null && args.scpGrade9 !== undefined ? args.scpGrade9 - args.totalPurchasePrice : null;
   const psa10Upside = args.scpPsa10 !== null && args.scpPsa10 !== undefined ? args.scpPsa10 - args.totalPurchasePrice : null;
+  const gradingLane = determineGradingLane({
+    totalPurchasePrice: args.totalPurchasePrice,
+    scpUngradedSell: args.scpUngradedSell,
+    scpGrade9: args.scpGrade9,
+    scpPsa10: args.scpPsa10,
+  });
 
   if (profit !== null) {
     parts.push(`${profit >= 0 ? 'Spread' : 'Gap'} ${toCurrency(profit)}`);
@@ -339,6 +458,9 @@ export function summarizeDealReasons(args: {
   }
   if (psa10Upside !== null && psa10Upside > 0) {
     parts.push(`PSA 10 upside ${toCurrency(psa10Upside)}`);
+  }
+  if (gradingLane.label !== 'Low grading edge') {
+    parts.push(`${gradingLane.label}`);
   }
   if (args.auctionEndsAt) {
     const relative = formatRelativeTime(args.auctionEndsAt);
