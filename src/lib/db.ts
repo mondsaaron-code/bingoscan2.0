@@ -1,6 +1,6 @@
 import { createSupabaseAdminClient } from '@/lib/supabase';
 import { getOpenAiTodayCostUsd } from '@/lib/openai-admin';
-import { normalizeTitleFingerprint, safeJsonParse, slugify, tokenizeLoose } from '@/lib/utils';
+import { normalizeSellerUsername, normalizeTitleFingerprint, safeJsonParse, slugify, summarizeSellerOutcomeMemory, tokenizeLoose } from '@/lib/utils';
 import type {
   DashboardSnapshot,
   Disposition,
@@ -34,6 +34,22 @@ type BadLogicMemoryRow = {
   fingerprint: string;
   createdAt: string;
   reasoning: string | null;
+};
+
+type TitleOutcomeMemoryDbRow = {
+  ebayTitle: string;
+  disposition: Disposition;
+};
+
+export type SellerOutcomeMemory = {
+  sellerUsername: string;
+  total: number;
+  purchased: number;
+  suppress: number;
+  badLogic: number;
+  score: number;
+  label: string;
+  detail: string;
 };
 
 type UsageRow = {
@@ -313,6 +329,57 @@ export async function getRecentBadLogicPatterns(limit = 250): Promise<BadLogicMe
   }));
 }
 
+
+export async function getRecentTitleOutcomeMemory(limit = 400): Promise<TitleOutcomeMemoryDbRow[]> {
+  const { data, error } = await getSupabase()
+    .from('scan_results')
+    .select('ebay_title, disposition')
+    .not('disposition', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return ((data ?? []) as Array<Record<string, unknown>>)
+    .filter((row) => row.ebay_title && row.disposition)
+    .map((row) => ({
+      ebayTitle: String(row.ebay_title),
+      disposition: row.disposition as Disposition,
+    }));
+}
+
+export async function getSellerOutcomeMemory(sellerUsername: string, limit = 120): Promise<SellerOutcomeMemory | null> {
+  const normalizedSeller = normalizeSellerUsername(sellerUsername);
+  if (!normalizedSeller) return null;
+
+  const { data, error } = await getSupabase()
+    .from('scan_results')
+    .select('seller_username, disposition')
+    .eq('seller_username', normalizedSeller)
+    .not('disposition', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+
+  const rows = ((data ?? []) as Array<Record<string, unknown>>).filter((row) => row.disposition);
+  if (rows.length === 0) return null;
+
+  let purchased = 0;
+  let suppress = 0;
+  let badLogic = 0;
+  for (const row of rows) {
+    const disposition = row.disposition as Disposition;
+    if (disposition === 'purchased') purchased += 1;
+    else if (disposition === 'suppress_90_days') suppress += 1;
+    else if (disposition === 'bad_logic') badLogic += 1;
+  }
+
+  return summarizeSellerOutcomeMemory({
+    sellerUsername: normalizedSeller,
+    purchased,
+    suppress,
+    badLogic,
+  });
+}
+
 export async function getManualMatchOverride(
   ebayTitle: string,
 ): Promise<{ scpProductId: string; scpProductName: string } | null> {
@@ -578,6 +645,10 @@ function mapResult(row: Record<string, unknown>): ScanResultRow {
     aiConfidence: row.ai_confidence === null ? null : Number(row.ai_confidence),
     needsReview: Boolean(row.needs_review),
     auctionEndsAt: row.auction_ends_at ? String(row.auction_ends_at) : null,
+    sellerUsername: row.seller_username ? String(row.seller_username) : null,
+    sellerFeedbackPercentage: row.seller_feedback_percentage === null ? null : Number(row.seller_feedback_percentage),
+    sellerFeedbackScore: row.seller_feedback_score === null ? null : Number(row.seller_feedback_score),
+    listingQualityScore: row.listing_quality_score === null ? null : Number(row.listing_quality_score),
     createdAt: String(row.created_at),
     disposition: (row.disposition as Disposition | null) ?? null,
     reasoning: row.reasoning ? String(row.reasoning) : null,

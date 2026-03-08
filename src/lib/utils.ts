@@ -526,6 +526,130 @@ export function summarizeDealReasons(args: {
   return parts.join(' • ');
 }
 
+
+const TITLE_MEMORY_STOP_WORDS = new Set([
+  'the', 'and', 'with', 'for', 'card', 'cards', 'trading', 'sports', 'ebay', 'seller', 'look', 'nice', 'great', 'rare',
+  'rookie', 'rc', 'auto', 'autograph', 'signed', 'patch', 'relic', 'jersey', 'raw', 'graded', 'psa', 'bgs', 'sgc', 'cgc',
+]);
+
+export type TitleOutcomeMemoryRow = {
+  ebayTitle: string;
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic';
+};
+
+export type TitleOutcomeMemory = {
+  exact: Map<string, number>;
+  tokenWeights: Map<string, number>;
+};
+
+export type SellerOutcomeSummary = {
+  sellerUsername: string;
+  total: number;
+  purchased: number;
+  suppress: number;
+  badLogic: number;
+  score: number;
+  label: string;
+  detail: string;
+};
+
+export function normalizeSellerUsername(value: string | null | undefined): string | null {
+  const cleaned = compactWhitespace(value ?? '').toLowerCase();
+  return cleaned || null;
+}
+
+export function buildTitleOutcomeMemory(rows: TitleOutcomeMemoryRow[]): TitleOutcomeMemory {
+  const exact = new Map<string, number>();
+  const tokenWeights = new Map<string, number>();
+
+  for (const row of rows) {
+    const fingerprint = normalizeTitleFingerprint(row.ebayTitle);
+    if (!fingerprint) continue;
+
+    const exactWeight = row.disposition === 'purchased' ? 7 : row.disposition === 'bad_logic' ? -10 : -4;
+    exact.set(fingerprint, (exact.get(fingerprint) ?? 0) + exactWeight);
+
+    const tokenWeight = row.disposition === 'purchased' ? 1.6 : row.disposition === 'bad_logic' ? -2.4 : -0.8;
+    const tokens = new Set(
+      tokenizeLoose(row.ebayTitle)
+        .map((token) => token.replace(/[\[\]]/g, ''))
+        .filter((token) => token.length > 2)
+        .filter((token) => !TITLE_MEMORY_STOP_WORDS.has(token))
+    );
+
+    for (const token of tokens) {
+      if (/^(19|20)\d{2}$/.test(token)) continue;
+      tokenWeights.set(token, (tokenWeights.get(token) ?? 0) + tokenWeight);
+    }
+  }
+
+  return { exact, tokenWeights };
+}
+
+export function scoreListingAgainstTitleMemory(title: string, memory: TitleOutcomeMemory | null | undefined): { score: number; reason: string | null } {
+  if (!memory) return { score: 0, reason: null };
+  const fingerprint = normalizeTitleFingerprint(title);
+  if (!fingerprint) return { score: 0, reason: null };
+
+  const exactScore = memory.exact.get(fingerprint) ?? 0;
+  const tokens = new Set(
+    tokenizeLoose(title)
+      .map((token) => token.replace(/[\[\]]/g, ''))
+      .filter((token) => token.length > 2)
+      .filter((token) => !TITLE_MEMORY_STOP_WORDS.has(token))
+  );
+  let tokenScore = 0;
+  for (const token of tokens) {
+    tokenScore += memory.tokenWeights.get(token) ?? 0;
+  }
+
+  const total = exactScore + Math.max(-8, Math.min(8, tokenScore));
+  if (total <= -10) return { score: Math.round(total), reason: 'historical bad-logic pattern penalty' };
+  if (total <= -5) return { score: Math.round(total), reason: 'weak historical title pattern' };
+  if (total >= 8) return { score: Math.round(total), reason: 'historical good title pattern boost' };
+  if (total >= 4) return { score: Math.round(total), reason: 'historically decent title pattern' };
+  return { score: Math.round(total), reason: null };
+}
+
+export function summarizeSellerOutcomeMemory(args: {
+  sellerUsername: string;
+  purchased: number;
+  suppress: number;
+  badLogic: number;
+}): SellerOutcomeSummary {
+  const total = args.purchased + args.suppress + args.badLogic;
+  const score = args.purchased * 4 - args.badLogic * 5 - args.suppress * 1.5;
+  let label = 'No seller history';
+  let detail = 'First tracked listing from this seller';
+
+  if (total >= 1) {
+    if (args.purchased >= 2 && score >= 6) {
+      label = 'Strong seller history';
+      detail = `${args.purchased}/${total} prior outcomes were purchased`;
+    } else if (args.badLogic >= 2 && score <= -7) {
+      label = 'Weak seller history';
+      detail = `${args.badLogic}/${total} prior outcomes were bad logic`;
+    } else if (args.suppress >= 3 && args.purchased === 0 && score <= -5) {
+      label = 'Soft seller fade';
+      detail = `${args.suppress}/${total} prior outcomes were suppressed`;
+    } else {
+      label = 'Mixed seller history';
+      detail = `${args.purchased} purchased • ${args.suppress} suppressed • ${args.badLogic} bad logic`;
+    }
+  }
+
+  return {
+    sellerUsername: args.sellerUsername,
+    total,
+    purchased: args.purchased,
+    suppress: args.suppress,
+    badLogic: args.badLogic,
+    score: Math.round(score),
+    label,
+    detail,
+  };
+}
+
 export function tokenSimilarity(left: string, right: string): number {
   const leftSet = new Set(tokenizeLoose(left).filter((token) => token.length > 2));
   const rightSet = new Set(tokenizeLoose(right).filter((token) => token.length > 2));

@@ -6,9 +6,11 @@ import {
   getExceededUsageLimits,
   getManualMatchOverride,
   getRecentBadLogicPatterns,
+  getRecentTitleOutcomeMemory,
   getScanById,
   getScanResultMemory,
   getScpCacheCsvTextByStoragePath,
+  getSellerOutcomeMemory,
   incrementUsage,
   insertCandidate,
   insertResult,
@@ -29,9 +31,12 @@ import {
 import { identifyWithXimilar } from '@/lib/ximilar';
 import {
   buildDealDiversityKeys,
+  buildTitleOutcomeMemory,
   compactWhitespace,
   determineGradingLane,
+  normalizeSellerUsername,
   normalizeTitleFingerprint,
+  scoreListingAgainstTitleMemory,
   scoreListingPriority,
   scoreSellerListingQuality,
   shouldRejectLowTrustListing,
@@ -47,10 +52,14 @@ const MAX_CANDIDATES_PER_TICK = 3;
 const MIN_CANDIDATES_PER_TICK = 1;
 const AUTO_ACCEPT_CONFIDENCE = 90;
 const BAD_LOGIC_CACHE_TTL_MS = 2 * 60 * 1000;
+const TITLE_OUTCOME_CACHE_TTL_MS = 2 * 60 * 1000;
+const SELLER_OUTCOME_CACHE_TTL_MS = 10 * 60 * 1000;
 const MAX_EXACT_FAMILY_RESULTS = 1;
 const MAX_CLUSTER_RESULTS = 2;
 
 let badLogicCache: { loadedAt: number; rows: Array<{ ebayTitle: string; fingerprint: string; createdAt: string; reasoning: string | null }> } | null = null;
+let titleOutcomeMemoryCache: { loadedAt: number; memory: ReturnType<typeof buildTitleOutcomeMemory> } | null = null;
+const sellerOutcomeCache = new Map<string, { loadedAt: number; value: Awaited<ReturnType<typeof getSellerOutcomeMemory>> }>();
 
 export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   const scan = await getScanById(scanId);
@@ -92,7 +101,8 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   }
 
   const existingResultMemory = await getScanResultMemory(scanId);
-  const prioritizedListings = prioritizeListingsForScan(listings, scan.filters, existingResultMemory);
+  const titleOutcomeMemory = await getTitleOutcomeMemoryCached();
+  const prioritizedListings = prioritizeListingsForScan(listings, scan.filters, existingResultMemory, titleOutcomeMemory);
   await addScanEvent(
     scanId,
     'info',
@@ -128,6 +138,7 @@ Priority ${score}`);
     }
 
     const rejectionReason = shouldRejectTitle(listing.title, scan.filters);
+    const titleMemorySignal = scoreListingAgainstTitleMemory(listing.title, titleOutcomeMemory);
     const candidateId = await insertCandidate(scanId, {
       ebay_item_id: listing.itemId,
       ebay_title: listing.title,
@@ -148,8 +159,17 @@ Priority ${score}`);
       continue;
     }
 
+    if (titleMemorySignal.score <= -10) {
+      const memoryReason = `Suppressed by title-pattern memory: ${titleMemorySignal.reason ?? 'historical low-quality pattern'}`;
+      await updateCandidate(candidateId, { stage: 'filtered_out', rejection_reason: memoryReason });
+      await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+      await addScanEvent(scanId, 'info', 'filtering', memoryReason, listing.title);
+      processed += 1;
+      continue;
+    }
+
     try {
-      await evaluateListing(scanId, candidateId, listing, scan.filters);
+      await evaluateListing(scanId, candidateId, listing, scan.filters, titleOutcomeMemory);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown candidate evaluation error';
       await updateCandidate(candidateId, { stage: 'error', rejection_reason: message });
@@ -170,7 +190,7 @@ Priority ${score}`);
   return (await getScanById(scanId))!;
 }
 
-async function evaluateListing(scanId: string, candidateId: string, listing: EbayListing, filters: SearchForm): Promise<void> {
+async function evaluateListing(scanId: string, candidateId: string, listing: EbayListing, filters: SearchForm, titleOutcomeMemory: ReturnType<typeof buildTitleOutcomeMemory>): Promise<void> {
   await markScanStatus(scanId, 'matching_scp', 'Inspecting listing and matching SportsCardsPro candidates');
   await updateCandidate(candidateId, { stage: 'matching_scp' });
   await appendMetrics(scanId, { candidatesEvaluated: 1 });
@@ -195,8 +215,35 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
     aspectMap: details?.aspectMap ?? null,
     condition: details?.condition ?? listing.condition ?? null,
   });
+  const sellerUsername = normalizeSellerUsername(details?.sellerUsername);
+  const sellerOutcome = sellerUsername ? await getSellerOutcomeMemoryCached(sellerUsername) : null;
+  const titleMemorySignal = scoreListingAgainstTitleMemory(`${listing.title} ${details?.subtitle ?? ''}`.trim(), titleOutcomeMemory);
+  const trustAdjustedScore = Math.max(
+    0,
+    Math.min(
+      100,
+      listingQuality.score + Math.max(-14, Math.min(8, sellerOutcome?.score ?? 0)) + Math.max(-8, Math.min(6, titleMemorySignal.score)),
+    ),
+  );
+
+  await updateCandidate(candidateId, {
+    seller_username: sellerUsername,
+    seller_feedback_percentage: details?.sellerFeedbackPercentage ?? null,
+    seller_feedback_score: details?.sellerFeedbackScore ?? null,
+    listing_quality_score: trustAdjustedScore,
+  });
+
+  if (sellerOutcome?.total && sellerOutcome.total >= 3 && sellerOutcome.purchased === 0 && (sellerOutcome.badLogic >= 2 || sellerOutcome.score <= -8)) {
+    const sellerReason = `Suppressed by seller memory: ${sellerOutcome.label}`;
+    await updateCandidate(candidateId, { stage: 'filtered_out', rejection_reason: sellerReason });
+    await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+    await addScanEvent(scanId, 'info', 'filtering', sellerReason, `${listing.title}
+${sellerOutcome.detail}`);
+    return;
+  }
+
   const lowTrustReason = shouldRejectLowTrustListing({
-    score: listingQuality.score,
+    score: trustAdjustedScore,
     sellerFeedbackPercentage: details?.sellerFeedbackPercentage ?? null,
     sellerFeedbackScore: details?.sellerFeedbackScore ?? null,
     imageCount,
@@ -210,7 +257,8 @@ async function evaluateListing(scanId: string, candidateId: string, listing: Eba
     await updateCandidate(candidateId, { stage: 'filtered_out', rejection_reason: lowTrustReason });
     await appendMetrics(scanId, { candidatesFilteredOut: 1 });
     await addScanEvent(scanId, 'info', 'filtering', lowTrustReason, `${listing.title}
-${listingQuality.summary}`);
+${listingQuality.summary}${sellerOutcome ? `
+${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     return;
   }
 
@@ -233,7 +281,7 @@ ${listingQuality.summary}`);
     }
   }
 
-  await addScanEvent(scanId, 'info', 'matching_scp', 'Hydrated listing quality', listingQuality.summary);
+  await addScanEvent(scanId, 'info', 'matching_scp', 'Hydrated listing quality', `${listingQuality.summary}${sellerOutcome ? `\n${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}${titleMemorySignal.reason ? `\nTitle memory: ${titleMemorySignal.reason}` : ''}`);
 
   const override = await getManualMatchOverride(listing.title);
   if (override) {
@@ -322,6 +370,8 @@ ${listingQuality.summary}`);
           estimatedProfit,
           estimatedMarginPct,
           listingQuality,
+          details,
+          sellerOutcome,
         );
         await appendMetrics(scanId, { dealsFound: 1 });
         await updateCandidate(candidateId, {
@@ -360,7 +410,7 @@ ${listingQuality.summary}`);
       ? placeholderCandidate.ungradedSell - listing.total
       : null;
     const placeholderMargin = placeholderCandidate?.ungradedSell && placeholderProfit !== null ? (placeholderProfit / listing.total) * 100 : null;
-    const resultId = await insertResultPayload(scanId, listing, placeholderCandidate, decision, true, placeholderProfit, placeholderMargin, listingQuality);
+    const resultId = await insertResultPayload(scanId, listing, placeholderCandidate, decision, true, placeholderProfit, placeholderMargin, listingQuality, details, sellerOutcome);
     await insertReviewOptions(
       resultId,
       rankedCandidates.slice(0, 3).map((candidate, index) => reviewOptionPayload(candidate, index + 1, decision.confidence)),
@@ -390,7 +440,7 @@ ${listingQuality.summary}`);
     return;
   }
 
-  await insertResultPayload(scanId, listing, chosen, decision, false, estimatedProfit, estimatedMarginPct, listingQuality);
+  await insertResultPayload(scanId, listing, chosen, decision, false, estimatedProfit, estimatedMarginPct, listingQuality, details, sellerOutcome);
   await appendMetrics(scanId, { dealsFound: 1 });
   await updateCandidate(candidateId, { stage: 'accepted', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning, scp_product_id: chosen.productId });
   await addScanEvent(scanId, 'info', 'publishing_results', 'Added deal result', `${listing.title}\nConfidence ${decision.confidence}`);
@@ -418,6 +468,8 @@ async function insertResultPayload(
   estimatedProfit?: number | null,
   estimatedMarginPct?: number | null,
   listingQuality?: { score: number; summary: string; signals: string[] } | null,
+  details?: EbayListingDetails | null,
+  sellerOutcome?: Awaited<ReturnType<typeof getSellerOutcomeMemory>> | null,
 ): Promise<string> {
   const gradingLane = determineGradingLane({
     totalPurchasePrice: listing.total,
@@ -425,7 +477,14 @@ async function insertResultPayload(
     scpGrade9: candidate?.grade9 ?? null,
     scpPsa10: candidate?.psa10 ?? null,
   });
-  const composedReasoning = [decision.reasoning, listingQuality?.summary, `Grade lane: ${gradingLane.label}${gradingLane.detail ? ` (${gradingLane.detail})` : ''}`]
+  const sellerUsername = normalizeSellerUsername(details?.sellerUsername);
+  const composedReasoning = [
+    decision.reasoning,
+    listingQuality?.summary,
+    sellerUsername ? `Seller ${sellerUsername}` : null,
+    sellerOutcome ? `Seller memory: ${sellerOutcome.label}${sellerOutcome.detail ? ` (${sellerOutcome.detail})` : ''}` : null,
+    `Grade lane: ${gradingLane.label}${gradingLane.detail ? ` (${gradingLane.detail})` : ''}`,
+  ]
     .filter(Boolean)
     .join(' • ');
 
@@ -439,6 +498,10 @@ async function insertResultPayload(
     shipping_price: listing.shipping,
     total_purchase_price: listing.total,
     auction_ends_at: listing.auctionEndsAt,
+    seller_username: sellerUsername,
+    seller_feedback_percentage: details?.sellerFeedbackPercentage ?? null,
+    seller_feedback_score: details?.sellerFeedbackScore ?? null,
+    listing_quality_score: listingQuality?.score ?? null,
     scp_product_id: candidate?.productId ?? null,
     scp_product_name: candidate?.productName ?? null,
     scp_link: candidate?.productUrl ?? null,
@@ -618,6 +681,7 @@ function prioritizeListingsForScan(
   listings: EbayListing[],
   filters: SearchForm,
   existingRows: Array<{ ebayTitle: string; scpProductName: string | null; needsReview: boolean }>,
+  titleOutcomeMemory: ReturnType<typeof buildTitleOutcomeMemory>,
 ): Array<{ listing: EbayListing; score: number; reasons: string[] }> {
   const existingFamilies = new Set<string>();
   const existingClusterCounts = new Map<string, number>();
@@ -639,6 +703,7 @@ function prioritizeListingsForScan(
   return listings
     .map((listing) => {
       const keys = buildDealDiversityKeys({ ebayTitle: listing.title });
+      const titleMemorySignal = scoreListingAgainstTitleMemory(listing.title, titleOutcomeMemory);
       const baseScore = scoreListingPriority({
         title: listing.title,
         price: listing.price,
@@ -647,10 +712,11 @@ function prioritizeListingsForScan(
         auctionEndsAt: listing.auctionEndsAt,
         condition: listing.condition,
         filters,
-      });
+      }) + titleMemorySignal.score;
 
       let penalty = 0;
       const reasons: string[] = [];
+      if (titleMemorySignal.reason && titleMemorySignal.score !== 0) reasons.push(titleMemorySignal.reason);
       if (keys.exactFamily && existingFamilies.has(keys.exactFamily)) {
         penalty += 34;
         reasons.push('family already shown');
@@ -748,6 +814,29 @@ function passesThresholds(filters: SearchForm, estimatedProfit: number, estimate
   return true;
 }
 
+
+
+async function getTitleOutcomeMemoryCached(): Promise<ReturnType<typeof buildTitleOutcomeMemory>> {
+  if (titleOutcomeMemoryCache && Date.now() - titleOutcomeMemoryCache.loadedAt < TITLE_OUTCOME_CACHE_TTL_MS) {
+    return titleOutcomeMemoryCache.memory;
+  }
+  const rows = await getRecentTitleOutcomeMemory(400);
+  const memory = buildTitleOutcomeMemory(rows);
+  titleOutcomeMemoryCache = { loadedAt: Date.now(), memory };
+  return memory;
+}
+
+async function getSellerOutcomeMemoryCached(sellerUsername: string): Promise<Awaited<ReturnType<typeof getSellerOutcomeMemory>>> {
+  const normalized = normalizeSellerUsername(sellerUsername);
+  if (!normalized) return null;
+  const cached = sellerOutcomeCache.get(normalized);
+  if (cached && Date.now() - cached.loadedAt < SELLER_OUTCOME_CACHE_TTL_MS) {
+    return cached.value;
+  }
+  const value = await getSellerOutcomeMemory(normalized);
+  sellerOutcomeCache.set(normalized, { loadedAt: Date.now(), value });
+  return value;
+}
 
 async function getBadLogicPatternsCached(): Promise<Array<{ ebayTitle: string; fingerprint: string; createdAt: string; reasoning: string | null }>> {
   if (badLogicCache && Date.now() - badLogicCache.loadedAt < BAD_LOGIC_CACHE_TTL_MS) {

@@ -44,6 +44,10 @@ create table if not exists public.scan_candidates (
   ai_confidence numeric(5,2),
   ai_reasoning text,
   scp_product_id text,
+  seller_username text,
+  seller_feedback_percentage numeric(6,2),
+  seller_feedback_score integer,
+  listing_quality_score numeric(6,2),
   created_at timestamptz not null default now()
 );
 
@@ -68,6 +72,10 @@ create table if not exists public.scan_results (
   ai_confidence numeric(5,2),
   needs_review boolean not null default false,
   auction_ends_at timestamptz,
+  seller_username text,
+  seller_feedback_percentage numeric(6,2),
+  seller_feedback_score integer,
+  listing_quality_score numeric(6,2),
   reasoning text,
   disposition text check (disposition in ('purchased','suppress_90_days','bad_logic')),
   created_at timestamptz not null default now()
@@ -138,6 +146,7 @@ create table if not exists public.app_errors (
 
 create index if not exists scans_status_idx on public.scans(status, created_at desc);
 create index if not exists scan_results_scan_idx on public.scan_results(scan_id, created_at desc);
+create index if not exists scan_results_seller_idx on public.scan_results(seller_username, created_at desc);
 create index if not exists scan_candidates_scan_idx on public.scan_candidates(scan_id, created_at desc);
 create index if not exists stage_events_scan_idx on public.scan_stage_events(scan_id, created_at desc);
 

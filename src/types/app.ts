@@ -71,6 +71,10 @@ export type ScanResultRow = {
   aiConfidence: number | null;
   needsReview: boolean;
   auctionEndsAt: string | null;
+  sellerUsername: string | null;
+  sellerFeedbackPercentage: number | null;
+  sellerFeedbackScore: number | null;
+  listingQualityScore: number | null;
   createdAt: string;
   disposition: Disposition | null;
   reasoning: string | null;

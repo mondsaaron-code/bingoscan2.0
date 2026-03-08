@@ -75,3 +75,9 @@ The Deals page now also shows a simple SCP Cache Library panel so you can confir
 ## Manual review memory
 
 Manual review picks save a reusable override automatically, so when you correct a match once, future near-identical titles can auto-apply that product without sending the row back to review.
+
+
+## Pass 13 SQL
+Run the migration before deploying this pass:
+
+- `supabase/migrations/20260308_pass13_seller_title_memory.sql`

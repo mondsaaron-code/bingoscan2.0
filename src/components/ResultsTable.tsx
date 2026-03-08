@@ -106,6 +106,7 @@ export function ResultsTable({
                   <td>
                     <div><a href={row.ebayUrl} target="_blank" rel="noreferrer">{row.ebayTitle}</a></div>
                     <div className="small muted">Confidence: {row.aiConfidence ? `${row.aiConfidence}%` : '—'}</div>
+                    {row.sellerUsername ? <div className="small muted">Seller: {row.sellerUsername}{row.listingQualityScore !== null ? ` · Listing ${Math.round(row.listingQualityScore)}/100` : ''}</div> : null}
                     <div className="small" style={{ color: '#d8e1f0', marginTop: 4 }}>
                       Why it stands out: {summarizeDealReasons({
                         estimatedProfit: row.estimatedProfit,

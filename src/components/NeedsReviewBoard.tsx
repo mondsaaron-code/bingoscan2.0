@@ -68,6 +68,7 @@ export function NeedsReviewBoard({
                       <div>
                         <a href={row.ebayUrl} target="_blank" rel="noreferrer" style={{ fontWeight: 700 }}>{row.ebayTitle}</a>
                       </div>
+                      {row.sellerUsername ? <div className="small muted">Seller: {row.sellerUsername}{row.listingQualityScore !== null ? ` · Listing ${Math.round(row.listingQualityScore)}/100` : ''}</div> : null}
                       <div className="grid grid-3" style={{ gap: 10 }}>
                         <div className="kpi">
                           <div className="small muted">Purchase Total</div>
