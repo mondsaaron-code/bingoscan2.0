@@ -5,8 +5,10 @@ import {
   findScpCacheMatches,
   getExceededUsageLimits,
   getManualMatchOverride,
+  getRecentAuctionOutcomeMemory,
   getRecentBadLogicPatterns,
   getRecentFamilyOutcomeMemory,
+  getRecentPriceBandOutcomeMemory,
   getRecentReviewResolutionMemory,
   getRecentTitleOutcomeMemory,
   getScanById,
@@ -32,15 +34,19 @@ import {
 } from '@/lib/scp';
 import { identifyWithXimilar } from '@/lib/ximilar';
 import {
+  buildAuctionOutcomeMemory,
   buildDealDiversityKeys,
   buildFamilyOutcomeMemory,
+  buildPriceBandOutcomeMemory,
   buildReviewResolutionMemory,
   buildTitleOutcomeMemory,
   compactWhitespace,
   determineGradingLane,
   normalizeSellerUsername,
   normalizeTitleFingerprint,
+  scoreListingAgainstAuctionMemory,
   scoreListingAgainstFamilyMemory,
+  scoreListingAgainstPriceBandMemory,
   scoreScpCandidateAgainstReviewMemory,
   scoreListingAgainstTitleMemory,
   scoreListingPriority,
@@ -62,6 +68,8 @@ const TITLE_OUTCOME_CACHE_TTL_MS = 2 * 60 * 1000;
 const SELLER_OUTCOME_CACHE_TTL_MS = 10 * 60 * 1000;
 const FAMILY_OUTCOME_CACHE_TTL_MS = 2 * 60 * 1000;
 const REVIEW_RESOLUTION_CACHE_TTL_MS = 2 * 60 * 1000;
+const AUCTION_OUTCOME_CACHE_TTL_MS = 2 * 60 * 1000;
+const PRICE_BAND_OUTCOME_CACHE_TTL_MS = 2 * 60 * 1000;
 const MAX_EXACT_FAMILY_RESULTS = 1;
 const MAX_CLUSTER_RESULTS = 2;
 
@@ -69,6 +77,8 @@ let badLogicCache: { loadedAt: number; rows: Array<{ ebayTitle: string; fingerpr
 let titleOutcomeMemoryCache: { loadedAt: number; memory: ReturnType<typeof buildTitleOutcomeMemory> } | null = null;
 let familyOutcomeMemoryCache: { loadedAt: number; memory: ReturnType<typeof buildFamilyOutcomeMemory> } | null = null;
 let reviewResolutionMemoryCache: { loadedAt: number; memory: ReturnType<typeof buildReviewResolutionMemory> } | null = null;
+let auctionOutcomeMemoryCache: { loadedAt: number; memory: ReturnType<typeof buildAuctionOutcomeMemory> } | null = null;
+let priceBandOutcomeMemoryCache: { loadedAt: number; memory: ReturnType<typeof buildPriceBandOutcomeMemory> } | null = null;
 const sellerOutcomeCache = new Map<string, { loadedAt: number; value: Awaited<ReturnType<typeof getSellerOutcomeMemory>> }>();
 
 export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
@@ -114,7 +124,17 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   const titleOutcomeMemory = await getTitleOutcomeMemoryCached();
   const familyOutcomeMemory = await getFamilyOutcomeMemoryCached();
   const reviewResolutionMemory = await getReviewResolutionMemoryCached();
-  const prioritizedListings = prioritizeListingsForScan(listings, scan.filters, existingResultMemory, titleOutcomeMemory, familyOutcomeMemory);
+  const auctionOutcomeMemory = await getAuctionOutcomeMemoryCached();
+  const priceBandOutcomeMemory = await getPriceBandOutcomeMemoryCached();
+  const prioritizedListings = prioritizeListingsForScan(
+    listings,
+    scan.filters,
+    existingResultMemory,
+    titleOutcomeMemory,
+    familyOutcomeMemory,
+    auctionOutcomeMemory,
+    priceBandOutcomeMemory,
+  );
   await addScanEvent(
     scanId,
     'info',
@@ -181,7 +201,7 @@ Priority ${score}`);
     }
 
     try {
-      await evaluateListing(scanId, candidateId, listing, scan.filters, titleOutcomeMemory, familyOutcomeMemory, reviewResolutionMemory);
+      await evaluateListing(scanId, candidateId, listing, scan.filters, titleOutcomeMemory, familyOutcomeMemory, reviewResolutionMemory, auctionOutcomeMemory, priceBandOutcomeMemory);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown candidate evaluation error';
       await updateCandidate(candidateId, { stage: 'error', rejection_reason: message });
@@ -210,6 +230,8 @@ async function evaluateListing(
   titleOutcomeMemory: ReturnType<typeof buildTitleOutcomeMemory>,
   familyOutcomeMemory: ReturnType<typeof buildFamilyOutcomeMemory>,
   reviewResolutionMemory: ReturnType<typeof buildReviewResolutionMemory>,
+  auctionOutcomeMemory: ReturnType<typeof buildAuctionOutcomeMemory>,
+  priceBandOutcomeMemory: ReturnType<typeof buildPriceBandOutcomeMemory>,
 ): Promise<void> {
   await markScanStatus(scanId, 'matching_scp', 'Inspecting listing and matching SportsCardsPro candidates');
   await updateCandidate(candidateId, { stage: 'matching_scp' });
@@ -239,6 +261,8 @@ async function evaluateListing(
   const sellerOutcome = sellerUsername ? await getSellerOutcomeMemoryCached(sellerUsername) : null;
   const titleMemorySignal = scoreListingAgainstTitleMemory(`${listing.title} ${details?.subtitle ?? ''}`.trim(), titleOutcomeMemory);
   const familyMemorySignal = scoreListingAgainstFamilyMemory({ ebayTitle: `${listing.title} ${details?.subtitle ?? ''}`.trim() }, familyOutcomeMemory);
+  const auctionMemorySignal = scoreListingAgainstAuctionMemory({ ebayTitle: `${listing.title} ${details?.subtitle ?? ''}`.trim(), auctionEndsAt: listing.auctionEndsAt }, auctionOutcomeMemory);
+  const priceBandMemorySignal = scoreListingAgainstPriceBandMemory({ ebayTitle: `${listing.title} ${details?.subtitle ?? ''}`.trim(), totalPurchasePrice: listing.total }, priceBandOutcomeMemory);
   const trustAdjustedScore = Math.max(
     0,
     Math.min(
@@ -246,7 +270,9 @@ async function evaluateListing(
       listingQuality.score
         + Math.max(-14, Math.min(8, sellerOutcome?.score ?? 0))
         + Math.max(-8, Math.min(6, titleMemorySignal.score))
-        + Math.max(-8, Math.min(6, familyMemorySignal.score)),
+        + Math.max(-8, Math.min(6, familyMemorySignal.score))
+        + Math.max(-6, Math.min(5, auctionMemorySignal.score))
+        + Math.max(-6, Math.min(5, priceBandMemorySignal.score)),
     ),
   );
 
@@ -256,6 +282,15 @@ async function evaluateListing(
     seller_feedback_score: details?.sellerFeedbackScore ?? null,
     listing_quality_score: trustAdjustedScore,
   });
+
+  if (auctionMemorySignal.score <= -9 && priceBandMemorySignal.score <= -8 && trustAdjustedScore < 60) {
+    const patternReason = `Suppressed by auction/price-band memory: ${auctionMemorySignal.reason ?? 'weak auction pattern'}${priceBandMemorySignal.reason ? ` + ${priceBandMemorySignal.reason}` : ''}`;
+    await updateCandidate(candidateId, { stage: 'filtered_out', rejection_reason: patternReason });
+    await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+    await addScanEvent(scanId, 'info', 'filtering', patternReason, `${listing.title}
+${auctionMemorySignal.band} • ${priceBandMemorySignal.band}`);
+    return;
+  }
 
   if (familyMemorySignal.score <= -12 && titleMemorySignal.score <= 0 && trustAdjustedScore < 58) {
     const familyReason = `Suppressed by set/parallel family memory: ${familyMemorySignal.reason ?? 'historically weak family'}`;
@@ -313,7 +348,7 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     }
   }
 
-  await addScanEvent(scanId, 'info', 'matching_scp', 'Hydrated listing quality', `${listingQuality.summary}${sellerOutcome ? `\n${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}${titleMemorySignal.reason ? `\nTitle memory: ${titleMemorySignal.reason}` : ''}${familyMemorySignal.reason ? `\nFamily memory: ${familyMemorySignal.reason}` : ''}`);
+  await addScanEvent(scanId, 'info', 'matching_scp', 'Hydrated listing quality', `${listingQuality.summary}${sellerOutcome ? `\n${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}${titleMemorySignal.reason ? `\nTitle memory: ${titleMemorySignal.reason}` : ''}${familyMemorySignal.reason ? `\nFamily memory: ${familyMemorySignal.reason}` : ''}${auctionMemorySignal.reason ? `\nAuction memory: ${auctionMemorySignal.reason}` : ''}${priceBandMemorySignal.reason ? `\nPrice-band memory: ${priceBandMemorySignal.reason}` : ''}`);
 
   const override = await getManualMatchOverride(listing.title);
   if (override) {
@@ -405,6 +440,8 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
           details,
           sellerOutcome,
           scoreListingAgainstFamilyMemory({ ebayTitle: listing.title, scpProductName: overrideCandidate.productName }, familyOutcomeMemory),
+          auctionMemorySignal,
+          priceBandMemorySignal,
         );
         await appendMetrics(scanId, { dealsFound: 1 });
         await updateCandidate(candidateId, {
@@ -466,6 +503,8 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
       details,
       sellerOutcome,
       scoreListingAgainstFamilyMemory({ ebayTitle: listing.title, scpProductName: placeholderCandidate?.productName ?? null }, familyOutcomeMemory),
+      auctionMemorySignal,
+      priceBandMemorySignal,
     );
     await insertReviewOptions(
       resultId,
@@ -508,6 +547,8 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     details,
     sellerOutcome,
     scoreListingAgainstFamilyMemory({ ebayTitle: listing.title, scpProductName: chosen.productName }, familyOutcomeMemory),
+    auctionMemorySignal,
+    priceBandMemorySignal,
   );
   await appendMetrics(scanId, { dealsFound: 1 });
   await updateCandidate(candidateId, { stage: 'accepted', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning, scp_product_id: chosen.productId });
@@ -539,6 +580,8 @@ async function insertResultPayload(
   details?: EbayListingDetails | null,
   sellerOutcome?: Awaited<ReturnType<typeof getSellerOutcomeMemory>> | null,
   familyMemorySignal?: { score: number; reason: string | null; exactFamily: string | null; cluster: string | null } | null,
+  auctionMemorySignal?: { score: number; reason: string | null; band: string; familyKey: string | null } | null,
+  priceBandMemorySignal?: { score: number; reason: string | null; band: string; familyKey: string | null } | null,
 ): Promise<string> {
   const gradingLane = determineGradingLane({
     totalPurchasePrice: listing.total,
@@ -553,6 +596,8 @@ async function insertResultPayload(
     sellerUsername ? `Seller ${sellerUsername}` : null,
     sellerOutcome ? `Seller memory: ${sellerOutcome.label}${sellerOutcome.detail ? ` (${sellerOutcome.detail})` : ''}` : null,
     familyMemorySignal?.reason ? `Family memory: ${familyMemorySignal.reason}${familyMemorySignal.exactFamily ? ` (${familyMemorySignal.exactFamily})` : ''}` : null,
+    auctionMemorySignal?.reason ? `Auction memory: ${auctionMemorySignal.reason} (${auctionMemorySignal.band})` : null,
+    priceBandMemorySignal?.reason ? `Price-band memory: ${priceBandMemorySignal.reason} (${priceBandMemorySignal.band})` : null,
     `Grade lane: ${gradingLane.label}${gradingLane.detail ? ` (${gradingLane.detail})` : ''}`,
   ]
     .filter(Boolean)
@@ -778,6 +823,8 @@ function prioritizeListingsForScan(
   existingRows: Array<{ ebayTitle: string; scpProductName: string | null; needsReview: boolean }>,
   titleOutcomeMemory: ReturnType<typeof buildTitleOutcomeMemory>,
   familyOutcomeMemory: ReturnType<typeof buildFamilyOutcomeMemory>,
+  auctionOutcomeMemory: ReturnType<typeof buildAuctionOutcomeMemory>,
+  priceBandOutcomeMemory: ReturnType<typeof buildPriceBandOutcomeMemory>,
 ): Array<{ listing: EbayListing; score: number; reasons: string[] }> {
   const existingFamilies = new Set<string>();
   const existingClusterCounts = new Map<string, number>();
@@ -801,6 +848,8 @@ function prioritizeListingsForScan(
       const keys = buildDealDiversityKeys({ ebayTitle: listing.title });
       const titleMemorySignal = scoreListingAgainstTitleMemory(listing.title, titleOutcomeMemory);
       const familyMemorySignal = scoreListingAgainstFamilyMemory({ ebayTitle: listing.title }, familyOutcomeMemory);
+      const auctionMemorySignal = scoreListingAgainstAuctionMemory({ ebayTitle: listing.title, auctionEndsAt: listing.auctionEndsAt }, auctionOutcomeMemory);
+      const priceBandMemorySignal = scoreListingAgainstPriceBandMemory({ ebayTitle: listing.title, totalPurchasePrice: listing.total }, priceBandOutcomeMemory);
       const baseScore = scoreListingPriority({
         title: listing.title,
         price: listing.price,
@@ -809,12 +858,14 @@ function prioritizeListingsForScan(
         auctionEndsAt: listing.auctionEndsAt,
         condition: listing.condition,
         filters,
-      }) + titleMemorySignal.score + familyMemorySignal.score;
+      }) + titleMemorySignal.score + familyMemorySignal.score + auctionMemorySignal.score + priceBandMemorySignal.score;
 
       let penalty = 0;
       const reasons: string[] = [];
       if (titleMemorySignal.reason && titleMemorySignal.score !== 0) reasons.push(titleMemorySignal.reason);
       if (familyMemorySignal.reason && familyMemorySignal.score !== 0) reasons.push(familyMemorySignal.reason);
+      if (auctionMemorySignal.reason && auctionMemorySignal.score !== 0) reasons.push(auctionMemorySignal.reason);
+      if (priceBandMemorySignal.reason && priceBandMemorySignal.score !== 0) reasons.push(priceBandMemorySignal.reason);
       if (keys.exactFamily && existingFamilies.has(keys.exactFamily)) {
         penalty += 34;
         reasons.push('family already shown');
@@ -941,6 +992,26 @@ async function getReviewResolutionMemoryCached(): Promise<ReturnType<typeof buil
   const rows = await getRecentReviewResolutionMemory(140);
   const memory = buildReviewResolutionMemory(rows);
   reviewResolutionMemoryCache = { loadedAt: Date.now(), memory };
+  return memory;
+}
+
+async function getAuctionOutcomeMemoryCached(): Promise<ReturnType<typeof buildAuctionOutcomeMemory>> {
+  if (auctionOutcomeMemoryCache && Date.now() - auctionOutcomeMemoryCache.loadedAt < AUCTION_OUTCOME_CACHE_TTL_MS) {
+    return auctionOutcomeMemoryCache.memory;
+  }
+  const rows = await getRecentAuctionOutcomeMemory(420);
+  const memory = buildAuctionOutcomeMemory(rows);
+  auctionOutcomeMemoryCache = { loadedAt: Date.now(), memory };
+  return memory;
+}
+
+async function getPriceBandOutcomeMemoryCached(): Promise<ReturnType<typeof buildPriceBandOutcomeMemory>> {
+  if (priceBandOutcomeMemoryCache && Date.now() - priceBandOutcomeMemoryCache.loadedAt < PRICE_BAND_OUTCOME_CACHE_TTL_MS) {
+    return priceBandOutcomeMemoryCache.memory;
+  }
+  const rows = await getRecentPriceBandOutcomeMemory(520);
+  const memory = buildPriceBandOutcomeMemory(rows);
+  priceBandOutcomeMemoryCache = { loadedAt: Date.now(), memory };
   return memory;
 }
 

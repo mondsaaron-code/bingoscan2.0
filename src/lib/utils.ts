@@ -568,6 +568,33 @@ export type ReviewResolutionMemory = {
   familyToken: Map<string, Map<string, number>>;
 };
 
+export type AuctionOutcomeMemoryRow = {
+  ebayTitle: string;
+  scpProductName?: string | null;
+  auctionEndsAt?: string | null;
+  totalPurchasePrice: number;
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic';
+};
+
+export type AuctionOutcomeMemory = {
+  globalBand: Map<string, number>;
+  familyBand: Map<string, Map<string, number>>;
+};
+
+export type PriceBandOutcomeMemoryRow = {
+  ebayTitle: string;
+  scpProductName?: string | null;
+  totalPurchasePrice: number;
+  estimatedProfit?: number | null;
+  estimatedMarginPct?: number | null;
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic';
+};
+
+export type PriceBandOutcomeMemory = {
+  globalBand: Map<string, number>;
+  familyBand: Map<string, Map<string, number>>;
+};
+
 export type SellerOutcomeSummary = {
   sellerUsername: string;
   total: number;
@@ -763,6 +790,104 @@ export function scoreScpCandidateAgainstReviewMemory(
     return { score: Math.round(total), reason: 'positive manual-review signal for this SCP option family', familyKey };
   }
   return { score: Math.round(total), reason: null, familyKey };
+}
+
+function getAuctionUrgencyBand(auctionEndsAt: string | null | undefined): string {
+  if (!auctionEndsAt) return 'buy_now';
+  const diffHours = (new Date(auctionEndsAt).getTime() - Date.now()) / 3_600_000;
+  if (!Number.isFinite(diffHours) || diffHours <= 0) return 'auction_end';
+  if (diffHours <= 1) return 'auction_1h';
+  if (diffHours <= 2) return 'auction_2h';
+  if (diffHours <= 4) return 'auction_4h';
+  if (diffHours <= 6) return 'auction_6h';
+  return 'auction_later';
+}
+
+function getPriceBand(totalPurchasePrice: number): string {
+  if (totalPurchasePrice < 10) return 'under_10';
+  if (totalPurchasePrice < 25) return '10_25';
+  if (totalPurchasePrice < 50) return '25_50';
+  if (totalPurchasePrice < 100) return '50_100';
+  return '100_plus';
+}
+
+export function buildAuctionOutcomeMemory(rows: AuctionOutcomeMemoryRow[]): AuctionOutcomeMemory {
+  const globalBand = new Map<string, number>();
+  const familyBand = new Map<string, Map<string, number>>();
+
+  for (const row of rows) {
+    const keys = buildDealDiversityKeys({ ebayTitle: row.ebayTitle, scpProductName: row.scpProductName ?? null });
+    const familyKey = keys.cluster || keys.exactFamily || normalizeTitleFingerprint(row.ebayTitle);
+    const band = getAuctionUrgencyBand(row.auctionEndsAt);
+    const baseWeight = row.disposition === 'purchased' ? 5 : row.disposition === 'bad_logic' ? -7 : -2;
+    globalBand.set(band, (globalBand.get(band) ?? 0) + Math.max(-4, Math.min(4, baseWeight - (band === 'buy_now' ? 0 : 1))));
+    if (!familyKey) continue;
+    if (!familyBand.has(familyKey)) familyBand.set(familyKey, new Map());
+    const bandMap = familyBand.get(familyKey)!;
+    bandMap.set(band, (bandMap.get(band) ?? 0) + baseWeight);
+  }
+
+  return { globalBand, familyBand };
+}
+
+export function scoreListingAgainstAuctionMemory(
+  args: { ebayTitle: string; scpProductName?: string | null; auctionEndsAt?: string | null },
+  memory: AuctionOutcomeMemory | null | undefined,
+): { score: number; reason: string | null; band: string; familyKey: string | null } {
+  const keys = buildDealDiversityKeys(args);
+  const band = getAuctionUrgencyBand(args.auctionEndsAt);
+  const familyKey = keys.cluster || keys.exactFamily || normalizeTitleFingerprint(args.ebayTitle);
+  if (!memory) return { score: 0, reason: null, band, familyKey: familyKey || null };
+
+  const globalScore = memory.globalBand.get(band) ?? 0;
+  const familyScore = familyKey ? (memory.familyBand.get(familyKey)?.get(band) ?? 0) : 0;
+  const total = Math.max(-12, Math.min(12, globalScore + familyScore));
+  if (total <= -8) return { score: Math.round(total), reason: 'historically weak auction timing pattern', band, familyKey: familyKey || null };
+  if (total <= -4) return { score: Math.round(total), reason: 'mixed auction timing history', band, familyKey: familyKey || null };
+  if (total >= 7) return { score: Math.round(total), reason: 'historically productive auction timing', band, familyKey: familyKey || null };
+  if (total >= 4) return { score: Math.round(total), reason: 'decent auction timing history', band, familyKey: familyKey || null };
+  return { score: Math.round(total), reason: null, band, familyKey: familyKey || null };
+}
+
+export function buildPriceBandOutcomeMemory(rows: PriceBandOutcomeMemoryRow[]): PriceBandOutcomeMemory {
+  const globalBand = new Map<string, number>();
+  const familyBand = new Map<string, Map<string, number>>();
+
+  for (const row of rows) {
+    const keys = buildDealDiversityKeys({ ebayTitle: row.ebayTitle, scpProductName: row.scpProductName ?? null });
+    const familyKey = keys.cluster || keys.exactFamily || normalizeTitleFingerprint(row.ebayTitle);
+    const band = getPriceBand(row.totalPurchasePrice);
+    const qualityBonus = row.disposition === 'purchased'
+      ? ((row.estimatedMarginPct ?? 0) >= 60 ? 2 : (row.estimatedProfit ?? 0) >= 25 ? 1 : 0)
+      : 0;
+    const baseWeight = row.disposition === 'purchased' ? 4 + qualityBonus : row.disposition === 'bad_logic' ? -6 : -2;
+    globalBand.set(band, (globalBand.get(band) ?? 0) + Math.max(-4, Math.min(4, baseWeight)));
+    if (!familyKey) continue;
+    if (!familyBand.has(familyKey)) familyBand.set(familyKey, new Map());
+    const bandMap = familyBand.get(familyKey)!;
+    bandMap.set(band, (bandMap.get(band) ?? 0) + baseWeight);
+  }
+
+  return { globalBand, familyBand };
+}
+
+export function scoreListingAgainstPriceBandMemory(
+  args: { ebayTitle: string; scpProductName?: string | null; totalPurchasePrice: number },
+  memory: PriceBandOutcomeMemory | null | undefined,
+): { score: number; reason: string | null; band: string; familyKey: string | null } {
+  const keys = buildDealDiversityKeys(args);
+  const band = getPriceBand(args.totalPurchasePrice);
+  const familyKey = keys.cluster || keys.exactFamily || normalizeTitleFingerprint(args.ebayTitle);
+  if (!memory) return { score: 0, reason: null, band, familyKey: familyKey || null };
+
+  const globalScore = memory.globalBand.get(band) ?? 0;
+  const familyScore = familyKey ? (memory.familyBand.get(familyKey)?.get(band) ?? 0) : 0;
+  const total = Math.max(-12, Math.min(12, globalScore + familyScore));
+  if (total <= -8) return { score: Math.round(total), reason: 'historically weak price band', band, familyKey: familyKey || null };
+  if (total <= -4) return { score: Math.round(total), reason: 'mixed price-band history', band, familyKey: familyKey || null };
+  if (total >= 7) return { score: Math.round(total), reason: 'historically productive price band', band, familyKey: familyKey || null };
+  if (total >= 4) return { score: Math.round(total), reason: 'decent price-band history', band, familyKey: familyKey || null };
+  return { score: Math.round(total), reason: null, band, familyKey: familyKey || null };
 }
 
 export function summarizeSellerOutcomeMemory(args: {

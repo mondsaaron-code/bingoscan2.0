@@ -56,6 +56,23 @@ type ReviewResolutionMemoryDbRow = {
   chosen: boolean;
 };
 
+type AuctionOutcomeMemoryDbRow = {
+  ebayTitle: string;
+  scpProductName: string | null;
+  auctionEndsAt: string | null;
+  totalPurchasePrice: number;
+  disposition: Disposition;
+};
+
+type PriceBandOutcomeMemoryDbRow = {
+  ebayTitle: string;
+  scpProductName: string | null;
+  totalPurchasePrice: number;
+  estimatedProfit: number | null;
+  estimatedMarginPct: number | null;
+  disposition: Disposition;
+};
+
 export type SellerOutcomeMemory = {
   sellerUsername: string;
   total: number;
@@ -434,6 +451,45 @@ export async function getRecentReviewResolutionMemory(limit = 120): Promise<Revi
   }
 
   return memoryRows;
+}
+
+export async function getRecentAuctionOutcomeMemory(limit = 400): Promise<AuctionOutcomeMemoryDbRow[]> {
+  const { data, error } = await getSupabase()
+    .from('scan_results')
+    .select('ebay_title, scp_product_name, auction_ends_at, total_purchase_price, disposition')
+    .not('disposition', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return ((data ?? []) as Array<Record<string, unknown>>)
+    .filter((row) => row.ebay_title && row.disposition && row.total_purchase_price !== null && row.total_purchase_price !== undefined)
+    .map((row) => ({
+      ebayTitle: String(row.ebay_title),
+      scpProductName: row.scp_product_name ? String(row.scp_product_name) : null,
+      auctionEndsAt: row.auction_ends_at ? String(row.auction_ends_at) : null,
+      totalPurchasePrice: Number(row.total_purchase_price),
+      disposition: row.disposition as Disposition,
+    }));
+}
+
+export async function getRecentPriceBandOutcomeMemory(limit = 500): Promise<PriceBandOutcomeMemoryDbRow[]> {
+  const { data, error } = await getSupabase()
+    .from('scan_results')
+    .select('ebay_title, scp_product_name, total_purchase_price, estimated_profit, estimated_margin_pct, disposition')
+    .not('disposition', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  return ((data ?? []) as Array<Record<string, unknown>>)
+    .filter((row) => row.ebay_title && row.disposition && row.total_purchase_price !== null && row.total_purchase_price !== undefined)
+    .map((row) => ({
+      ebayTitle: String(row.ebay_title),
+      scpProductName: row.scp_product_name ? String(row.scp_product_name) : null,
+      totalPurchasePrice: Number(row.total_purchase_price),
+      estimatedProfit: row.estimated_profit === null || row.estimated_profit === undefined ? null : Number(row.estimated_profit),
+      estimatedMarginPct: row.estimated_margin_pct === null || row.estimated_margin_pct === undefined ? null : Number(row.estimated_margin_pct),
+      disposition: row.disposition as Disposition,
+    }));
 }
 
 export async function getSellerOutcomeMemory(sellerUsername: string, limit = 120): Promise<SellerOutcomeMemory | null> {
