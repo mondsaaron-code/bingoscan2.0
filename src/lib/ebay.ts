@@ -75,7 +75,7 @@ export async function searchEbayListings(filters: SearchForm, offset = 0, limit 
   const token = await getEbayAccessToken();
   const environment = process.env.EBAY_ENVIRONMENT === 'sandbox' ? 'api.sandbox.ebay.com' : 'api.ebay.com';
 
-  const q = [...buildKeywordClauses(filters), ...buildNegativeClauses(filters).map((value) => `-${value}`)].join(' ');
+  const q = [...buildKeywordClauses(filters), ...buildNegativeClauses(filters).map(formatNegativeClause)].join(' ');
   const params = new URLSearchParams({
     q,
     limit: String(limit),
@@ -214,14 +214,16 @@ function uniqueStrings(values: Array<string | null | undefined>): string[] {
   return values.filter((value): value is string => Boolean(value)).filter((value, index, arr) => arr.indexOf(value) === index);
 }
 
-function sportToCategoryId(sport: string): string {
-  const normalized = sport.trim().toLowerCase();
-  if (normalized === 'baseball') return '213';
-  if (normalized === 'basketball') return '214';
-  if (normalized === 'football') return '215';
-  if (normalized === 'hockey') return '216';
+function sportToCategoryId(_sport: string): string {
   return '261328';
 }
+
+
+function formatNegativeClause(value: string): string {
+  const clean = compactWhitespace(value);
+  return /\s/.test(clean) ? `-"${clean}"` : `-${clean}`;
+}
+
 
 function buildEbayFilter(filters: SearchForm): string {
   const chunks: string[] = [];

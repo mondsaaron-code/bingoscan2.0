@@ -63,6 +63,14 @@ function rejectFromText(text: string, filters: SearchForm): string | null {
     }
   }
 
+  if (!filters.memorabilia && /\bjersey\b|\bshirt\b/i.test(text)) {
+    return 'Blocked phrase: jersey or shirt';
+  }
+
+  if (filters.sport.trim().toLowerCase() === 'football' && /\bsoccer\b|\bfutbol\b|\buefa\b|\bfifa\b|\bpremier league\b/i.test(text)) {
+    return 'Blocked soccer-style football listing';
+  }
+
   for (const pattern of MULTI_CARD_PATTERNS) {
     if (pattern.test(text)) {
       return 'Rejected multi-card or lot listing';
@@ -166,8 +174,18 @@ function normalizeFilterValue(value: string | null | undefined): string {
   return (value ?? '').toLowerCase().replace(/[^a-z0-9#]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
+function buildSportClause(filters: SearchForm): string | null {
+  const normalized = filters.sport.trim().toLowerCase();
+  if (!normalized) return null;
+  if (normalized === 'football') return 'football trading card';
+  if (normalized === 'basketball') return 'basketball trading card';
+  if (normalized === 'baseball') return 'baseball trading card';
+  if (normalized === 'hockey') return 'hockey trading card';
+  return `${normalized} trading card`;
+}
+
 export function buildKeywordClauses(filters: SearchForm): string[] {
-  const clauses = [filters.sport];
+  const clauses = [buildSportClause(filters) ?? filters.sport];
   if (filters.startYear && filters.endYear && filters.startYear === filters.endYear) {
     clauses.push(String(filters.startYear));
   } else {
@@ -203,7 +221,18 @@ export function buildNegativeClauses(filters: SearchForm): string[] {
     '1/1',
     'team set',
     'bundle',
+    'complete set',
+    'starter set',
   ];
+
+  const sport = filters.sport.trim().toLowerCase();
+  if (sport === 'football') {
+    negatives.push('soccer', 'futbol', 'uefa', 'fifa', 'premier league', 'women', 'womens', 'european');
+  }
+
+  if (!filters.memorabilia) {
+    negatives.push('jersey', 'shirt');
+  }
 
   if (filters.conditionMode === 'raw') {
     negatives.push('PSA', 'BGS', 'SGC', 'CGC', 'graded', 'slab');

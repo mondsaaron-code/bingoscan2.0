@@ -125,7 +125,8 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   }
 
   await markScanStatus(scanId, 'fetching_ebay', 'Fetching eBay listings');
-  const offset = scan.metrics.candidatesFetched;
+  const searchPageCount = await getEbaySearchPageCount(scanId);
+  const offset = searchPageCount * FETCH_PAGE_SIZE;
   const searchOutcome = await withProviderRetries('ebay', 'search', () => searchEbayListings(scan.filters, offset, FETCH_PAGE_SIZE), {
     scanId,
     stage: 'fetching_ebay',
@@ -144,7 +145,7 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   const listings = searchOutcome.value;
   await incrementUsage('ebay', 1);
   await appendMetrics(scanId, { ebayCalls: 1, candidatesFetched: listings.length });
-  await addScanEvent(scanId, 'info', 'fetching_ebay', `Fetched ${listings.length} eBay candidates`, `Offset ${offset}`);
+  await addScanEvent(scanId, 'info', 'fetching_ebay', `Fetched ${listings.length} eBay candidates`, `Offset ${offset} (page ${searchPageCount + 1})`);
 
   if (listings.length === 0) {
     await markScanStatus(scanId, 'completed', 'No more eBay listings returned');

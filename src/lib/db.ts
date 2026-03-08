@@ -238,6 +238,17 @@ export async function getLatestScan(): Promise<ScanSummary | null> {
   return data ? mapScan(data) : null;
 }
 
+export async function getEbaySearchPageCount(scanId: string): Promise<number> {
+  const { count, error } = await getSupabase()
+    .from('scan_stage_events')
+    .select('id', { count: 'exact', head: true })
+    .eq('scan_id', scanId)
+    .eq('stage', 'fetching_ebay')
+    .ilike('message', 'Fetched % eBay candidates');
+  if (error) throw error;
+  return count ?? 0;
+}
+
 export async function createScan(filters: SearchForm): Promise<ScanSummary> {
   const { data, error } = await getSupabase()
     .from('scans')
