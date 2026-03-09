@@ -936,11 +936,10 @@ async function createScpCacheRefreshRun(payload: {
 
 async function calculateScpCacheTrackerSummary(): Promise<ScpCacheTracker> {
   const supabase = getSupabase();
-  const [{ data: caches, error: cacheError }, lastRun, errorRuns, storageObjects] = await Promise.all([
+  const [{ data: caches, error: cacheError }, lastRun, errorRuns] = await Promise.all([
     supabase.from('scp_set_cache_index').select('*').order('updated_at', { ascending: false }).limit(1000),
     getLatestScpCacheRefreshRunSafe(),
     getScpCacheRefreshErrorRunsSafe(),
-    listAllScpCacheStorageObjectsSafe(),
   ]);
   if (cacheError) throw cacheError;
 
@@ -959,14 +958,6 @@ async function calculateScpCacheTrackerSummary(): Promise<ScpCacheTracker> {
         row.downloaded_at ? String(row.downloaded_at) : null,
         row.created_at ? String(row.created_at) : null,
       ),
-    });
-  }
-
-  for (const objectRow of storageObjects) {
-    const existing = trackerRowsByPath.get(objectRow.path);
-    trackerRowsByPath.set(objectRow.path, {
-      createdAt: chooseLatestTimestamp(existing?.createdAt, objectRow.createdAt),
-      freshnessSource: chooseLatestTimestamp(existing?.freshnessSource, objectRow.updatedAt, objectRow.createdAt),
     });
   }
 

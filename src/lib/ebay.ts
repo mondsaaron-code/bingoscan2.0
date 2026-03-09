@@ -113,7 +113,7 @@ export async function searchEbayListings(filters: SearchForm, offset = 0, limit 
     }>;
   };
 
-  const listings = (body.itemSummaries ?? [])
+  let listings = (body.itemSummaries ?? [])
     .filter((item) => item.itemId && item.title && item.itemWebUrl && item.price?.value)
     .map((item) => {
       const shipping = Number(item.shippingOptions?.[0]?.shippingCost?.value ?? '0');
@@ -130,6 +130,13 @@ export async function searchEbayListings(filters: SearchForm, offset = 0, limit 
         condition: item.condition ?? null,
       } satisfies EbayListing;
     });
+
+  if (filters.minPurchasePrice && filters.minPurchasePrice > 0) {
+    listings = listings.filter((listing) => listing.total >= filters.minPurchasePrice!);
+  }
+  if (filters.maxPurchasePrice && filters.maxPurchasePrice > 0) {
+    listings = listings.filter((listing) => listing.total <= filters.maxPurchasePrice!);
+  }
 
   return filters.listingMode === 'auction' && filters.auctionHours
     ? listings.filter((listing) => isWithinAuctionWindow(listing.auctionEndsAt, filters.auctionHours ?? null))

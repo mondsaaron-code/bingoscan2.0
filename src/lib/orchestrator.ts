@@ -448,7 +448,7 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     const cachedCsv = await getScpCacheCsvTextByStoragePath(cacheEntry.storagePath);
     if (!cachedCsv) continue;
     const cacheQueries = buildScpCacheQueries(scpQueries, cacheEntry.consoleName, listing, details, filters);
-    const cacheCandidates = searchScpCsvCandidatesMulti(cachedCsv, cacheQueries, 18);
+    const cacheCandidates = searchScpCsvCandidatesMulti(cachedCsv, cacheQueries, 30);
     if (cacheCandidates.length > 0) {
       candidatePool = mergeCandidates(candidatePool, cacheCandidates);
       loadedCacheNames.push(`${cacheEntry.consoleName} (${cacheCandidates.length})`);
@@ -458,7 +458,7 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     await addScanEvent(scanId, 'info', 'matching_scp', 'Loaded SCP set cache before live API lookup', loadedCacheNames.join(' • '));
   }
 
-  const shouldUseLiveScpApi = candidatePool.length < 3;
+  const shouldUseLiveScpApi = true;
   if (shouldUseLiveScpApi) {
     const scpSearchOutcome = await withProviderRetries('scp', 'candidate search', () => searchSportsCardsProCandidatesMulti(scpQueries, 10), {
       scanId,
@@ -489,7 +489,7 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
 
       candidatePool = mergeCandidates(candidatePool, baseCandidates);
       const hydrateIds = rankScpCandidatesLocally(listing, details, filters, candidatePool, reviewResolutionMemory, cardNumberOutcomeMemory)
-        .slice(0, 5)
+        .slice(0, 8)
         .map((row) => row.candidate.productId);
       if (hydrateIds.length > 0) {
         const hydrateOutcome = await withProviderRetries(
@@ -594,7 +594,7 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
   }
   const rankedCandidates = rankedCandidateRows
     .filter((row, index) => !(row.reviewMemory.score <= -10 && row.cardNumberMemory.score <= -10 && index > 0))
-    .slice(0, 5)
+    .slice(0, 8)
     .map((row) => row.candidate);
   const openAiOutcome = await withProviderRetries('openai', 'exact match verification', () => verifyCardMatchWithOpenAI(listing, rankedCandidates, {
     ximilarHints: ximilarHints?.titleHints ?? [],
@@ -653,16 +653,17 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
       return;
     }
 
-    const profitableReviewCandidates = rankedCandidates
-      .map((candidate) => {
-        const estimatedProfit = candidate.ungradedSell !== null && candidate.ungradedSell !== undefined
-          ? candidate.ungradedSell - listing.total
-          : null;
-        const estimatedMarginPct = candidate.ungradedSell && estimatedProfit !== null
-          ? (estimatedProfit / listing.total) * 100
-          : null;
-        return { candidate, estimatedProfit, estimatedMarginPct };
-      })
+    const candidateFinancials = rankedCandidates.map((candidate) => {
+      const estimatedProfit = candidate.ungradedSell !== null && candidate.ungradedSell !== undefined
+        ? candidate.ungradedSell - listing.total
+        : null;
+      const estimatedMarginPct = candidate.ungradedSell && estimatedProfit !== null
+        ? (estimatedProfit / listing.total) * 100
+        : null;
+      return { candidate, estimatedProfit, estimatedMarginPct };
+    });
+
+    const profitableReviewCandidates = candidateFinancials
       .filter((row) => row.estimatedProfit !== null && row.estimatedProfit > 0 && passesThresholds(filters, row.estimatedProfit, row.estimatedMarginPct));
 
     if (profitableReviewCandidates.length === 0) {
@@ -670,9 +671,14 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
       return;
     }
 
-    const bestReviewCandidate = profitableReviewCandidates
-      .slice()
-      .sort((a, b) => (b.estimatedProfit ?? Number.NEGATIVE_INFINITY) - (a.estimatedProfit ?? Number.NEGATIVE_INFINITY))[0];
+    const aiPreferredCandidates = decision.topThreeProductIds
+      .map((productId) => candidateFinancials.find((row) => row.candidate.productId === productId))
+      .filter((row): row is NonNullable<typeof row> => Boolean(row));
+
+    const bestReviewCandidate = aiPreferredCandidates.find((row) => row.estimatedProfit !== null && row.estimatedProfit > 0 && passesThresholds(filters, row.estimatedProfit, row.estimatedMarginPct))
+      ?? profitableReviewCandidates
+        .slice()
+        .sort((a, b) => (b.estimatedProfit ?? Number.NEGATIVE_INFINITY) - (a.estimatedProfit ?? Number.NEGATIVE_INFINITY))[0];
     const queueFloor = await getNeedsReviewQueueFloor(scanId, 20);
     if (queueFloor.count >= 20 && queueFloor.floorProfit !== null && (bestReviewCandidate.estimatedProfit ?? Number.NEGATIVE_INFINITY) <= queueFloor.floorProfit) {
       await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: 'Needs Review queue already holds 20 stronger profitable candidates.' });
@@ -680,9 +686,10 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     }
 
     const reviewCandidates = [
+      ...aiPreferredCandidates.map((row) => row.candidate),
       bestReviewCandidate.candidate,
-      ...rankedCandidates.filter((candidate) => candidate.productId !== bestReviewCandidate.candidate.productId),
-    ].slice(0, 3);
+      ...rankedCandidates,
+    ].filter((candidate, index, arr) => arr.findIndex((row) => row.productId === candidate.productId) === index).slice(0, 3);
 
     const resultId = await insertResultPayload(
       scanId,

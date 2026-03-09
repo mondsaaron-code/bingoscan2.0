@@ -239,11 +239,13 @@ export function buildEbayQueryTerms(filters: SearchForm): string[] {
   if (filters.variant) terms.push(filters.variant);
   if (filters.insert) terms.push(filters.insert);
   if (filters.cardNumber) terms.push(filters.cardNumber);
+  if (filters.numberedOutOf) terms.push(`/${filters.numberedOutOf}`);
   if (filters.playerName) terms.push(filters.playerName);
   if (filters.team) terms.push(filters.team);
   if (filters.rookie) terms.push('rookie');
   if (filters.autographed) terms.push('autograph');
   if (filters.memorabilia) terms.push('patch');
+  if (filters.numberedCard) terms.push('numbered');
   return terms.filter(Boolean).map((value) => compactWhitespace(value)).filter(Boolean);
 }
 
