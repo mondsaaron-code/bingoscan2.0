@@ -185,7 +185,9 @@ function mapScpRow(row: Record<string, unknown>, source: 'api' | 'cache'): ScpCa
     productName,
     consoleName,
     productUrl,
-    ungradedSell: penniesOrMoney(row['retail-loose-sell']),
+    // SportsCardsPro's current item-page 'Ungraded' price maps to loose-price.
+    // retail-loose-sell is a retailer asking-price recommendation and can be materially different.
+    ungradedSell: penniesOrMoney(row['loose-price'] ?? row['retail-loose-sell']),
     grade9: penniesOrMoney(row['graded-price']),
     psa10: penniesOrMoney(row['manual-only-price']),
     source,

@@ -109,16 +109,21 @@ export async function verifyCardMatchWithOpenAI(
               items: { type: 'string' },
               maxItems: 3,
             },
-            extractedAttributes: {
-              type: 'object',
-              additionalProperties: { type: 'string' },
-            },
           },
-          required: ['exactMatch', 'confidence', 'reasoning', 'chosenProductId', 'topThreeProductIds', 'extractedAttributes'],
+          required: ['exactMatch', 'confidence', 'reasoning', 'chosenProductId', 'topThreeProductIds'],
         },
       },
     },
   });
 
-  return JSON.parse(response.output_text) as MatchDecision;
+  const parsed = JSON.parse(response.output_text) as Omit<MatchDecision, 'extractedAttributes'> & { extractedAttributes?: Record<string, string> };
+
+  return {
+    exactMatch: parsed.exactMatch,
+    confidence: parsed.confidence,
+    reasoning: parsed.reasoning,
+    chosenProductId: parsed.chosenProductId,
+    topThreeProductIds: parsed.topThreeProductIds ?? [],
+    extractedAttributes: parsed.extractedAttributes ?? {},
+  };
 }
