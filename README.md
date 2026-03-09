@@ -20,9 +20,14 @@ Fresh Next.js + Supabase repo for scanning eBay sports card listings, matching t
 - One global active scan at a time
 - Big four sports only
 - Rule-based filtering before AI
-- OpenAI only verifies narrowed SCP candidate sets
+- OpenAI verifies narrowed SCP candidate sets using structured card fingerprints plus listing text/images
 - Ximilar is a helper, not mandatory for every listing
 - CSV caching abstraction is scaffolded, but direct premium SCP CSV automation still needs your live account flow validated
+
+## Strategy and roadmap
+
+- `docs/project-spec.md` — living project handoff, product goals, current architecture, and next milestone
+- `docs/ai-roadmap.md` — the AI improvement path future versions should follow
 
 ## Setup
 
