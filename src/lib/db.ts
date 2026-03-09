@@ -4,6 +4,7 @@ import { compactWhitespace, normalizeSellerUsername, normalizeTitleFingerprint, 
 import type {
   DashboardSnapshot,
   Disposition,
+  ReviewLearningSnapshot,
   ProviderLimitStatus,
   ProviderName,
   ReviewOption,
@@ -383,21 +384,49 @@ export async function insertCandidate(scanId: string, payload: Record<string, un
   return String(data.id);
 }
 
+function isSchemaDriftError(error: unknown, columns: string[]): boolean {
+  const message = typeof error === 'object' && error !== null
+    ? `${String((error as { message?: unknown }).message ?? '')} ${String((error as { details?: unknown }).details ?? '')} ${String((error as { hint?: unknown }).hint ?? '')}`.toLowerCase()
+    : String(error ?? '').toLowerCase();
+  return columns.some((column) => message.includes(column.toLowerCase()));
+}
+
+function omitColumns<T extends Record<string, unknown>>(row: T, columns: string[]): T {
+  const next = { ...row };
+  for (const column of columns) delete next[column];
+  return next;
+}
+
 export async function updateCandidate(candidateId: string, patch: Record<string, unknown>): Promise<void> {
   const { error } = await getSupabase().from('scan_candidates').update(patch).eq('id', candidateId);
   if (error) throw error;
 }
 
 export async function insertResult(payload: Record<string, unknown>): Promise<string> {
-  const { data, error } = await getSupabase().from('scan_results').insert(payload).select('id').single();
-  if (error) throw error;
-  return String(data.id);
+  const firstAttempt = await getSupabase().from('scan_results').insert(payload).select('id').single();
+  if (!firstAttempt.error) return String(firstAttempt.data.id);
+
+  const driftColumns = ['ai_chosen_product_id', 'ai_top_three_product_ids', 'review_reason'];
+  if (!isSchemaDriftError(firstAttempt.error, driftColumns)) throw firstAttempt.error;
+
+  const fallbackPayload = omitColumns(payload, driftColumns);
+  const secondAttempt = await getSupabase().from('scan_results').insert(fallbackPayload).select('id').single();
+  if (secondAttempt.error) throw secondAttempt.error;
+  return String(secondAttempt.data.id);
 }
 
 export async function insertReviewOptions(resultId: string, options: Array<Record<string, unknown>>): Promise<void> {
   if (options.length === 0) return;
-  const { error } = await getSupabase().from('scan_review_options').insert(options.map((option) => ({ ...option, result_id: resultId })));
-  if (error) throw error;
+  const rows = options.map((option) => ({ ...option, result_id: resultId }));
+  const firstAttempt = await getSupabase().from('scan_review_options').insert(rows);
+  if (!firstAttempt.error) return;
+
+  const driftColumns = ['candidate_source', 'match_score', 'positive_signals', 'negative_signals', 'ai_preferred'];
+  if (!isSchemaDriftError(firstAttempt.error, driftColumns)) throw firstAttempt.error;
+
+  const fallbackRows = rows.map((row) => omitColumns(row, driftColumns));
+  const secondAttempt = await getSupabase().from('scan_review_options').insert(fallbackRows);
+  if (secondAttempt.error) throw secondAttempt.error;
 }
 
 export async function setDisposition(resultIds: string[], disposition: Disposition): Promise<void> {
@@ -416,11 +445,11 @@ function passesThresholdsForFilters(filters: SearchForm, estimatedProfit: number
   return true;
 }
 
-export async function resolveReview(resultId: string, optionId: string): Promise<{ disposition: Disposition | null; matchedProductName: string; tracked: true }> {
+export async function resolveReview(resultId: string, optionId: string): Promise<{ disposition: Disposition | null; matchedProductName: string; tracked: true; selectedRank: number | null; selectedIsAiTop1: boolean; selectedInAiTop3: boolean }> {
   const supabase = getSupabase();
   const [{ data: option, error: optionError }, { data: resultRow, error: resultError }] = await Promise.all([
     supabase.from('scan_review_options').select('*').eq('id', optionId).single(),
-    supabase.from('scan_results').select('ebay_title, total_purchase_price, scan_id').eq('id', resultId).single(),
+    supabase.from('scan_results').select('*').eq('id', resultId).single(),
   ]);
   if (optionError) throw optionError;
   if (resultError) throw resultError;
@@ -441,6 +470,12 @@ export async function resolveReview(resultId: string, optionId: string): Promise
     : null;
   const profitable = passesThresholdsForFilters(filters, estimatedProfit, estimatedMarginPct);
   const disposition = profitable ? null : 'not_profitable';
+  const aiTopThreeProductIds = safeJsonParse<string[]>(resultRow?.ai_top_three_product_ids, []).map(String).slice(0, 3);
+  const aiChosenProductId = resultRow?.ai_chosen_product_id ? String(resultRow.ai_chosen_product_id) : null;
+  const selectedProductId = String(option.scp_product_id);
+  const selectedRank = Number.isFinite(Number(option.rank)) ? Number(option.rank) : null;
+  const selectedIsAiTop1 = Boolean(aiChosenProductId && selectedProductId === aiChosenProductId);
+  const selectedInAiTop3 = aiTopThreeProductIds.includes(selectedProductId);
 
   const { error: updateError } = await supabase
     .from('scan_results')
@@ -467,6 +502,28 @@ export async function resolveReview(resultId: string, optionId: string): Promise
     if (dispositionError) throw dispositionError;
   }
 
+  try {
+    const { error: feedbackError } = await supabase.from('review_resolution_events').insert({
+      scan_result_id: resultId,
+      scan_id: resultRow.scan_id,
+      selected_option_id: optionId,
+      selected_rank: selectedRank,
+      ai_chosen_product_id: aiChosenProductId,
+      ai_top_three_product_ids: aiTopThreeProductIds,
+      selected_product_id: selectedProductId,
+      selected_product_name: option.scp_product_name,
+      review_reason: resultRow.review_reason ?? null,
+      selected_profitable: profitable,
+      selected_in_ai_top3: selectedInAiTop3,
+      selected_is_ai_top1: selectedIsAiTop1,
+    });
+    if (feedbackError) {
+      // Keep the user-facing review action working even if the learning table has not been added yet.
+    }
+  } catch {
+    // Ignore learning-table drift so manual review resolution still succeeds.
+  }
+
   if (resultRow?.ebay_title) {
     await saveManualMatchOverride(String(resultRow.ebay_title), String(option.scp_product_id), String(option.scp_product_name));
   }
@@ -475,6 +532,9 @@ export async function resolveReview(resultId: string, optionId: string): Promise
     disposition,
     matchedProductName: String(option.scp_product_name),
     tracked: true,
+    selectedRank,
+    selectedIsAiTop1,
+    selectedInAiTop3,
   };
 }
 
@@ -1097,6 +1157,57 @@ export async function upsertScpCacheCsv(consoleName: string, csvText: string, so
   return storagePath;
 }
 
+
+async function getReviewLearningSnapshot(): Promise<ReviewLearningSnapshot> {
+  try {
+    const { data, error } = await getSupabase()
+      .from('review_resolution_events')
+      .select('selected_is_ai_top1, selected_in_ai_top3, selected_profitable, review_reason')
+      .order('created_at', { ascending: false })
+      .limit(250);
+    if (error) throw error;
+
+    const rows = (data ?? []) as Array<Record<string, unknown>>;
+    const totalResolved = rows.length;
+    const top1Chosen = rows.filter((row) => Boolean(row.selected_is_ai_top1)).length;
+    const top3Chosen = rows.filter((row) => Boolean(row.selected_in_ai_top3)).length;
+    const profitableSelections = rows.filter((row) => Boolean(row.selected_profitable)).length;
+    const notProfitableSelections = totalResolved - profitableSelections;
+    const reasonCounts = new Map<string, number>();
+
+    for (const row of rows) {
+      const reason = row.review_reason ? String(row.review_reason).trim() : '';
+      if (!reason) continue;
+      reasonCounts.set(reason, (reasonCounts.get(reason) ?? 0) + 1);
+    }
+
+    return {
+      totalResolved,
+      top1Chosen,
+      top3Chosen,
+      top1RatePct: totalResolved > 0 ? Math.round((top1Chosen / totalResolved) * 100) : null,
+      top3RatePct: totalResolved > 0 ? Math.round((top3Chosen / totalResolved) * 100) : null,
+      profitableSelections,
+      notProfitableSelections,
+      recentReasons: [...reasonCounts.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+        .slice(0, 5)
+        .map(([reason, count]) => ({ reason, count })),
+    } satisfies ReviewLearningSnapshot;
+  } catch {
+    return {
+      totalResolved: 0,
+      top1Chosen: 0,
+      top3Chosen: 0,
+      top1RatePct: null,
+      top3RatePct: null,
+      profitableSelections: 0,
+      notProfitableSelections: 0,
+      recentReasons: [],
+    } satisfies ReviewLearningSnapshot;
+  }
+}
+
 export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
   let scpCaches: ScpCacheEntry[] = [];
   let scpCacheTracker: ScpCacheTracker = {
@@ -1195,7 +1306,7 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
     }
   }
 
-  const usage = await getUsageSnapshot();
+  const [usage, reviewLearning] = await Promise.all([getUsageSnapshot(), getReviewLearningSnapshot()]);
   return {
     activeScan,
     latestScan,
@@ -1206,6 +1317,7 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
     diagnosticsSummary,
     scpCaches,
     scpCacheTracker,
+    reviewLearning,
     usage,
   };
 }
@@ -1283,6 +1395,8 @@ function mapResult(row: Record<string, unknown>): ScanResultRow {
     estimatedProfit: row.estimated_profit === null ? null : Number(row.estimated_profit),
     estimatedMarginPct: row.estimated_margin_pct === null ? null : Number(row.estimated_margin_pct),
     aiConfidence: row.ai_confidence === null ? null : Number(row.ai_confidence),
+    aiChosenProductId: row.ai_chosen_product_id ? String(row.ai_chosen_product_id) : null,
+    aiTopThreeProductIds: safeJsonParse<string[]>(row.ai_top_three_product_ids, []).map(String).slice(0, 3),
     needsReview: Boolean(row.needs_review),
     auctionEndsAt: row.auction_ends_at ? String(row.auction_ends_at) : null,
     sellerUsername: row.seller_username ? String(row.seller_username) : null,
@@ -1292,6 +1406,7 @@ function mapResult(row: Record<string, unknown>): ScanResultRow {
     createdAt: String(row.created_at),
     disposition: (row.disposition as Disposition | null) ?? null,
     reasoning: row.reasoning ? String(row.reasoning) : null,
+    reviewReason: row.review_reason ? String(row.review_reason) : null,
   };
 }
 
@@ -1307,6 +1422,11 @@ function mapReviewOption(row: Record<string, unknown>): ReviewOption {
     scpGrade9: row.scp_grade_9 === null ? null : Number(row.scp_grade_9),
     scpPsa10: row.scp_psa_10 === null ? null : Number(row.scp_psa_10),
     confidence: row.confidence === null ? null : Number(row.confidence),
+    candidateSource: row.candidate_source ? String(row.candidate_source) : null,
+    matchScore: row.match_score === null ? null : Number(row.match_score),
+    positiveSignals: safeJsonParse<string[]>(row.positive_signals, []).map(String).slice(0, 5),
+    negativeSignals: safeJsonParse<string[]>(row.negative_signals, []).map(String).slice(0, 5),
+    aiPreferred: Boolean(row.ai_preferred),
   };
 }
 

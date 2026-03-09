@@ -29,6 +29,7 @@ import {
   upsertDedupeItem,
 } from '@/lib/db';
 import { shouldRejectListingDetails, shouldRejectTitle } from '@/lib/filters';
+import { buildListingFingerprint, buildScpCandidateFingerprint, compareFingerprintMatch } from '@/lib/card-fingerprint';
 import { verifyCardMatchWithOpenAI } from '@/lib/openai';
 import {
   getSportsCardsProProduct,
@@ -560,6 +561,7 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
             extractedAttributes: {},
           },
           false,
+          null,
           estimatedProfit,
           estimatedMarginPct,
           listingQuality,
@@ -691,12 +693,22 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
       ...rankedCandidates,
     ].filter((candidate, index, arr) => arr.findIndex((row) => row.productId === candidate.productId) === index).slice(0, 3);
 
+    const reviewReason = buildNeedsReviewReason({
+      decision,
+      autoAcceptThreshold,
+      listing,
+      details,
+      chosen: bestReviewCandidate.candidate,
+      rankedCandidates: reviewCandidates,
+    });
+
     const resultId = await insertResultPayload(
       scanId,
       listing,
       bestReviewCandidate.candidate,
       decision,
       true,
+      reviewReason,
       bestReviewCandidate.estimatedProfit,
       bestReviewCandidate.estimatedMarginPct,
       listingQuality,
@@ -710,11 +722,12 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     );
     await insertReviewOptions(
       resultId,
-      reviewCandidates.map((candidate, index) => reviewOptionPayload(candidate, index + 1, decision.confidence)),
+      reviewCandidates.map((candidate, index) => reviewOptionPayload(listing, details, candidate, index + 1, decision.confidence, decision.topThreeProductIds.includes(candidate.productId))),
     );
     await appendMetrics(scanId, { needsReview: 1 });
     await updateCandidate(candidateId, { stage: 'needs_review', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning });
     await addScanEvent(scanId, 'warning', 'ai_verifying', 'Sent listing to Needs Review', `${listing.title}
+${reviewReason}
 ${decision.reasoning}`);
     return;
   }
@@ -744,6 +757,7 @@ ${decision.reasoning}`);
     chosen,
     decision,
     false,
+    null,
     estimatedProfit,
     estimatedMarginPct,
     listingQuality,
@@ -783,6 +797,7 @@ async function insertResultPayload(
   candidate: ScpCandidate | null,
   decision: Awaited<ReturnType<typeof verifyCardMatchWithOpenAI>>,
   needsReview: boolean,
+  reviewReason?: string | null,
   estimatedProfit?: number | null,
   estimatedMarginPct?: number | null,
   listingQuality?: { score: number; summary: string; signals: string[] } | null,
@@ -839,12 +854,54 @@ async function insertResultPayload(
     estimated_profit: estimatedProfit ?? null,
     estimated_margin_pct: estimatedMarginPct ?? null,
     ai_confidence: decision.confidence,
+    ai_chosen_product_id: decision.chosenProductId,
+    ai_top_three_product_ids: decision.topThreeProductIds ?? [],
     needs_review: needsReview,
     reasoning: composedReasoning,
+    review_reason: reviewReason ?? null,
   });
 }
 
-function reviewOptionPayload(candidate: ScpCandidate, rank: number, confidence: number | null): Record<string, unknown> {
+function buildNeedsReviewReason(args: {
+  decision: Awaited<ReturnType<typeof verifyCardMatchWithOpenAI>>;
+  autoAcceptThreshold: number;
+  listing: EbayListing;
+  details: EbayListingDetails | null;
+  chosen: ScpCandidate | null;
+  rankedCandidates: ScpCandidate[];
+}): string {
+  const reasons: string[] = [];
+  if (!args.decision.exactMatch) reasons.push('AI did not confirm an exact SCP match');
+  if (args.decision.confidence < args.autoAcceptThreshold) {
+    reasons.push(`AI confidence ${Math.round(args.decision.confidence)}% stayed below the ${args.autoAcceptThreshold}% auto-accept line`);
+  }
+  if (args.chosen) {
+    const listingFingerprint = buildListingFingerprint(args.listing, { details: args.details ?? null });
+    const comparison = compareFingerprintMatch(listingFingerprint, buildScpCandidateFingerprint(args.chosen));
+    if (comparison.negativeSignals.length > 0) {
+      reasons.push(comparison.negativeSignals.slice(0, 2).join(' · '));
+    } else if (comparison.positiveSignals.length > 0 && comparison.score < 24) {
+      reasons.push('Fingerprint evidence was only moderate, so a human check is safer');
+    }
+  }
+  if (args.rankedCandidates.length > 1) {
+    reasons.push(`Multiple plausible SCP variants remained in the top ${Math.min(3, args.rankedCandidates.length)}`);
+  }
+  return reasons.slice(0, 3).join(' • ') || 'Manual review requested for the final SCP variant check.';
+}
+
+function reviewOptionPayload(
+  listing: EbayListing,
+  details: EbayListingDetails | null,
+  candidate: ScpCandidate,
+  rank: number,
+  confidence: number | null,
+  aiPreferred: boolean,
+): Record<string, unknown> {
+  const comparison = compareFingerprintMatch(
+    buildListingFingerprint(listing, { details: details ?? null }),
+    buildScpCandidateFingerprint(candidate),
+  );
   return {
     rank,
     scp_product_id: candidate.productId,
@@ -854,6 +911,11 @@ function reviewOptionPayload(candidate: ScpCandidate, rank: number, confidence: 
     scp_grade_9: candidate.grade9,
     scp_psa_10: candidate.psa10,
     confidence,
+    candidate_source: candidate.source ?? null,
+    match_score: comparison.score,
+    positive_signals: comparison.positiveSignals,
+    negative_signals: comparison.negativeSignals,
+    ai_preferred: aiPreferred,
   };
 }
 

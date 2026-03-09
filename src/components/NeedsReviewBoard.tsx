@@ -96,6 +96,7 @@ export function NeedsReviewBoard({
                           needsReview: true,
                         }) || 'Compare the SCP candidates below.'}
                       </div>
+                      {row.reviewReason ? <div className="notice"><div className="small"><strong>Why this hit review:</strong> {row.reviewReason}</div></div> : null}
                       <div className="small muted">Current placeholder match: Ungraded {toCurrency(row.scpUngradedSell)} · Grade 9 {toCurrency(row.scpGrade9)} · PSA 10 {toCurrency(row.scpPsa10)}</div>
                       <div className="small muted">Grade lane: {gradingLane.label} — {gradingLane.detail}</div>
                       {row.reasoning ? <div className="notice"><div className="small"><strong>AI review note:</strong> {row.reasoning}</div></div> : null}
@@ -129,7 +130,11 @@ export function NeedsReviewBoard({
                             <div className="small muted">Option {option.rank}</div>
                             <div style={{ fontWeight: 700, lineHeight: 1.35 }}>{option.scpProductName}</div>
                           </div>
-                          {option.confidence !== null ? <span className="badge">AI {option.confidence}%</span> : null}
+                          <div className="row-actions" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                            {option.aiPreferred ? <span className="badge">AI shortlist</span> : null}
+                            {option.candidateSource ? <span className="badge">{option.candidateSource}</span> : null}
+                            {option.confidence !== null ? <span className="badge">AI {option.confidence}%</span> : null}
+                          </div>
                         </div>
                         <div className="grid grid-2" style={{ gap: 10 }}>
                           <div className="kpi">
@@ -151,6 +156,9 @@ export function NeedsReviewBoard({
                         </div>
                         <div className="small muted">Margin {toPct(margin)} · Grade 9 upside {toCurrency(grade9Upside)} · PSA 10 upside {toCurrency(psa10Upside)}</div>
                         <div className="small muted">Grade lane: {optionLane.label} — {optionLane.detail}</div>
+                        {option.matchScore !== null ? <div className="small muted">Fingerprint match score: {Math.round(option.matchScore)}</div> : null}
+                        {option.positiveSignals.length > 0 ? <div className="small" style={{ color: '#d8e1f0' }}><strong>Match signals:</strong> {option.positiveSignals.join(' · ')}</div> : null}
+                        {option.negativeSignals.length > 0 ? <div className="small muted"><strong>Watch-outs:</strong> {option.negativeSignals.join(' · ')}</div> : null}
                         <div className="row-actions">
                           <button className="btn btn-primary" onClick={() => onResolveReview(row.id, option.id)}>{profit !== null && profit <= 0 ? 'Use This Match & Hide' : 'Use This Match'}</button>
                           {option.scpLink ? <a className="btn btn-ghost" href={option.scpLink} target="_blank" rel="noreferrer">Open SCP</a> : null}

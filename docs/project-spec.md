@@ -30,6 +30,9 @@ The product goal is not just to generate results. The goal is to surface cards y
 - Needs Review can mark a correct match as `not_profitable`.
 - Purchase floor is enforced in app logic on the eBay total.
 - Cache candidates are used before live SCP lookups, but live SCP still supplements for better quality.
+- Review cards now store a human-readable reason for why they were sent to Needs Review.
+- Review options now show fingerprint match signals, candidate source, and AI shortlist status.
+- Manual review resolutions now log whether the winning SCP choice was AI top-1 or at least inside the AI top-3 shortlist.
 
 ## Current pain point
 The current bottleneck is too much manual review time. The system is still finding too many listings that need human correction before they are actionable.

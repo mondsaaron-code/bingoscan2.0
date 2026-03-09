@@ -70,6 +70,8 @@ create table if not exists public.scan_results (
   estimated_profit numeric(12,2),
   estimated_margin_pct numeric(8,2),
   ai_confidence numeric(5,2),
+  ai_chosen_product_id text,
+  ai_top_three_product_ids jsonb not null default '[]'::jsonb,
   needs_review boolean not null default false,
   auction_ends_at timestamptz,
   seller_username text,
@@ -77,6 +79,7 @@ create table if not exists public.scan_results (
   seller_feedback_score integer,
   listing_quality_score numeric(6,2),
   reasoning text,
+  review_reason text,
   disposition text check (disposition in ('purchased','suppress_90_days','bad_logic','not_profitable')),
   created_at timestamptz not null default now()
 );
@@ -92,6 +95,11 @@ create table if not exists public.scan_review_options (
   scp_grade_9 numeric(12,2),
   scp_psa_10 numeric(12,2),
   confidence numeric(5,2),
+  candidate_source text,
+  match_score numeric(8,2),
+  positive_signals jsonb not null default '[]'::jsonb,
+  negative_signals jsonb not null default '[]'::jsonb,
+  ai_preferred boolean not null default false,
   created_at timestamptz not null default now()
 );
 
@@ -99,6 +107,23 @@ create table if not exists public.result_dispositions (
   id uuid primary key default gen_random_uuid(),
   scan_result_id uuid not null references public.scan_results(id) on delete cascade,
   disposition text not null check (disposition in ('purchased','suppress_90_days','bad_logic','not_profitable')),
+  created_at timestamptz not null default now()
+);
+
+create table if not exists public.review_resolution_events (
+  id uuid primary key default gen_random_uuid(),
+  scan_result_id uuid not null references public.scan_results(id) on delete cascade,
+  scan_id uuid references public.scans(id) on delete set null,
+  selected_option_id uuid references public.scan_review_options(id) on delete set null,
+  selected_rank integer,
+  ai_chosen_product_id text,
+  ai_top_three_product_ids jsonb not null default '[]'::jsonb,
+  selected_product_id text not null,
+  selected_product_name text not null,
+  review_reason text,
+  selected_profitable boolean not null default false,
+  selected_in_ai_top3 boolean not null default false,
+  selected_is_ai_top1 boolean not null default false,
   created_at timestamptz not null default now()
 );
 
@@ -163,6 +188,8 @@ create index if not exists scan_results_scan_idx on public.scan_results(scan_id,
 create index if not exists scan_results_seller_idx on public.scan_results(seller_username, created_at desc);
 create index if not exists scan_candidates_scan_idx on public.scan_candidates(scan_id, created_at desc);
 create index if not exists stage_events_scan_idx on public.scan_stage_events(scan_id, created_at desc);
+create index if not exists review_resolution_events_scan_idx on public.review_resolution_events(scan_id, created_at desc);
+create index if not exists review_resolution_events_result_idx on public.review_resolution_events(scan_result_id, created_at desc);
 
 alter table public.profiles enable row level security;
 alter table public.scans enable row level security;
@@ -171,6 +198,7 @@ alter table public.scan_candidates enable row level security;
 alter table public.scan_results enable row level security;
 alter table public.scan_review_options enable row level security;
 alter table public.result_dispositions enable row level security;
+alter table public.review_resolution_events enable row level security;
 alter table public.ebay_item_dedupe enable row level security;
 alter table public.manual_match_overrides enable row level security;
 alter table public.scp_set_cache_index enable row level security;
@@ -189,6 +217,7 @@ create policy "authenticated full access scan candidates" on public.scan_candida
 create policy "authenticated full access scan results" on public.scan_results for all to authenticated using (true) with check (true);
 create policy "authenticated full access review options" on public.scan_review_options for all to authenticated using (true) with check (true);
 create policy "authenticated full access result dispositions" on public.result_dispositions for all to authenticated using (true) with check (true);
+create policy "authenticated full access review resolution events" on public.review_resolution_events for all to authenticated using (true) with check (true);
 create policy "authenticated full access ebay_item_dedupe" on public.ebay_item_dedupe for all to authenticated using (true) with check (true);
 create policy "authenticated full access manual_match_overrides" on public.manual_match_overrides for all to authenticated using (true) with check (true);
 create policy "authenticated full access scp_set_cache_index" on public.scp_set_cache_index for all to authenticated using (true) with check (true);

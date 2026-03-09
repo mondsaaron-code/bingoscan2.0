@@ -70,6 +70,8 @@ export type ScanResultRow = {
   estimatedProfit: number | null;
   estimatedMarginPct: number | null;
   aiConfidence: number | null;
+  aiChosenProductId: string | null;
+  aiTopThreeProductIds: string[];
   needsReview: boolean;
   auctionEndsAt: string | null;
   sellerUsername: string | null;
@@ -79,6 +81,7 @@ export type ScanResultRow = {
   createdAt: string;
   disposition: Disposition | null;
   reasoning: string | null;
+  reviewReason: string | null;
 };
 
 export type ReviewOption = {
@@ -92,6 +95,11 @@ export type ReviewOption = {
   scpGrade9: number | null;
   scpPsa10: number | null;
   confidence: number | null;
+  candidateSource: string | null;
+  matchScore: number | null;
+  positiveSignals: string[];
+  negativeSignals: string[];
+  aiPreferred: boolean;
 };
 
 export type ScanSummary = {
@@ -138,6 +146,17 @@ export type ScpCacheTracker = {
   lastCheckMessage: string | null;
 };
 
+export type ReviewLearningSnapshot = {
+  totalResolved: number;
+  top1Chosen: number;
+  top3Chosen: number;
+  top1RatePct: number | null;
+  top3RatePct: number | null;
+  profitableSelections: number;
+  notProfitableSelections: number;
+  recentReasons: Array<{ reason: string; count: number }>;
+};
+
 export type DashboardSnapshot = {
   activeScan: ScanSummary | null;
   latestScan: ScanSummary | null;
@@ -158,6 +177,7 @@ export type DashboardSnapshot = {
   };
   scpCaches: ScpCacheEntry[];
   scpCacheTracker: ScpCacheTracker;
+  reviewLearning: ReviewLearningSnapshot;
   usage: {
     openAiCostTodayUsd: number | null;
     ebayCallsToday: number;

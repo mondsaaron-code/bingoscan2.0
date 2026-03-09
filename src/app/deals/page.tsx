@@ -36,6 +36,16 @@ const EMPTY_DASHBOARD: DashboardSnapshot = {
     lastCheckStatus: null,
     lastCheckMessage: null,
   },
+  reviewLearning: {
+    totalResolved: 0,
+    top1Chosen: 0,
+    top3Chosen: 0,
+    top1RatePct: null,
+    top3RatePct: null,
+    profitableSelections: 0,
+    notProfitableSelections: 0,
+    recentReasons: [],
+  },
   usage: {
     openAiCostTodayUsd: null,
     ebayCallsToday: 0,
@@ -176,7 +186,7 @@ export default function DealsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ resultId, optionId }),
       });
-      const body = (await response.json()) as { error?: string; disposition?: Disposition | null; matchedProductName?: string | null; tracked?: boolean };
+      const body = (await response.json()) as { error?: string; disposition?: Disposition | null; matchedProductName?: string | null; tracked?: boolean; selectedIsAiTop1?: boolean; selectedInAiTop3?: boolean; selectedRank?: number | null };
       if (!response.ok) throw new Error(body.error ?? 'Unable to resolve review');
       await loadDashboard();
       const suffix = body.disposition === 'not_profitable'
@@ -184,7 +194,12 @@ export default function DealsPage() {
         : body.tracked
           ? ' The manual match was saved for future learning.'
           : '';
-      setBanner(`Review saved${body.matchedProductName ? ` for ${body.matchedProductName}` : ''}.${suffix}`);
+      const rankNote = body.selectedIsAiTop1
+        ? ' AI top-1 was correct.'
+        : body.selectedInAiTop3
+          ? ` AI had the correct card in its top ${body.selectedRank ?? 3}.`
+          : ' AI missed the winning SCP option.';
+      setBanner(`Review saved${body.matchedProductName ? ` for ${body.matchedProductName}` : ''}.${suffix}${rankNote}`);
     } catch (error) {
       setBanner(error instanceof Error ? error.message : 'Unable to resolve review');
     }
@@ -338,6 +353,44 @@ export default function DealsPage() {
             </div>
           </div>
         ) : null}
+
+        <div className="card card-pad stack">
+          <div className="spread">
+            <div>
+              <div className="section-title">Review Learning</div>
+              <div className="muted small">Tracks whether the correct SCP card was AI top-1 or at least inside the AI short list so future tuning is measurable.</div>
+            </div>
+            <div className="badge">{dashboard.reviewLearning.totalResolved} resolved</div>
+          </div>
+          <div className="grid grid-4">
+            <div className="kpi">
+              <div className="small muted">AI Top-1 Hit Rate</div>
+              <div className="kpi-value">{dashboard.reviewLearning.top1RatePct === null ? '—' : `${dashboard.reviewLearning.top1RatePct}%`}</div>
+            </div>
+            <div className="kpi">
+              <div className="small muted">AI Top-3 Hit Rate</div>
+              <div className="kpi-value">{dashboard.reviewLearning.top3RatePct === null ? '—' : `${dashboard.reviewLearning.top3RatePct}%`}</div>
+            </div>
+            <div className="kpi">
+              <div className="small muted">Profitable Picks</div>
+              <div className="kpi-value">{dashboard.reviewLearning.profitableSelections}</div>
+            </div>
+            <div className="kpi">
+              <div className="small muted">Not Profitable Picks</div>
+              <div className="kpi-value">{dashboard.reviewLearning.notProfitableSelections}</div>
+            </div>
+          </div>
+          {dashboard.reviewLearning.recentReasons.length > 0 ? (
+            <div className="stack" style={{ gap: 8 }}>
+              <div className="small muted">Most common review reasons</div>
+              <div className="row-actions" style={{ flexWrap: 'wrap' }}>
+                {dashboard.reviewLearning.recentReasons.map((reason) => (
+                  <span key={reason.reason} className="badge">{reason.count}× {reason.reason}</span>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
 
         <SearchForm onStart={startScan} isBusy={busy || Boolean(dashboard.activeScan)} />
         <div className="grid grid-2">

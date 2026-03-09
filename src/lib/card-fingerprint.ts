@@ -140,38 +140,105 @@ export function buildScpCandidateFingerprint(candidate: Pick<ScpCandidate, 'prod
   return buildFingerprintFromText(mergedText, { aspectMap: {}, condition: null });
 }
 
+export type FingerprintComparison = {
+  score: number;
+  positiveSignals: string[];
+  negativeSignals: string[];
+};
+
 export function scoreFingerprintSimilarity(listingFingerprint: CardFingerprint, candidateFingerprint: CardFingerprint): number {
+  return compareFingerprintMatch(listingFingerprint, candidateFingerprint).score;
+}
+
+export function compareFingerprintMatch(listingFingerprint: CardFingerprint, candidateFingerprint: CardFingerprint): FingerprintComparison {
   let score = 0;
+  const positiveSignals: string[] = [];
+  const negativeSignals: string[] = [];
 
   if (listingFingerprint.year && candidateFingerprint.year) {
-    score += listingFingerprint.year === candidateFingerprint.year ? 14 : -12;
+    if (listingFingerprint.year === candidateFingerprint.year) {
+      score += 14;
+      positiveSignals.push(`Year ${listingFingerprint.year}`);
+    } else {
+      score -= 12;
+      negativeSignals.push(`Year mismatch (${listingFingerprint.year} vs ${candidateFingerprint.year})`);
+    }
   }
   if (listingFingerprint.cardNumber && candidateFingerprint.cardNumber) {
-    score += listingFingerprint.cardNumber === candidateFingerprint.cardNumber ? 18 : -14;
+    if (listingFingerprint.cardNumber === candidateFingerprint.cardNumber) {
+      score += 18;
+      positiveSignals.push(`Card #${listingFingerprint.cardNumber}`);
+    } else {
+      score -= 14;
+      negativeSignals.push(`Card # mismatch (${listingFingerprint.cardNumber} vs ${candidateFingerprint.cardNumber})`);
+    }
   }
   if (listingFingerprint.parallel && candidateFingerprint.parallel) {
-    score += listingFingerprint.parallel === candidateFingerprint.parallel ? 12 : -10;
+    if (listingFingerprint.parallel === candidateFingerprint.parallel) {
+      score += 12;
+      positiveSignals.push(`Parallel ${candidateFingerprint.parallel}`);
+    } else {
+      score -= 10;
+      negativeSignals.push(`Parallel mismatch (${listingFingerprint.parallel} vs ${candidateFingerprint.parallel})`);
+    }
   }
   if (listingFingerprint.serialNumbered !== null && candidateFingerprint.serialNumbered !== null) {
-    score += listingFingerprint.serialNumbered === candidateFingerprint.serialNumbered ? 6 : -6;
+    if (listingFingerprint.serialNumbered === candidateFingerprint.serialNumbered) {
+      score += 6;
+      positiveSignals.push(listingFingerprint.serialNumbered ? 'Both serial-numbered' : 'Both unnumbered');
+    } else {
+      score -= 6;
+      negativeSignals.push('Serial-numbering mismatch');
+    }
   }
   if (listingFingerprint.autograph !== null && candidateFingerprint.autograph !== null) {
-    score += listingFingerprint.autograph === candidateFingerprint.autograph ? 5 : -5;
+    if (listingFingerprint.autograph === candidateFingerprint.autograph) {
+      score += 5;
+      if (listingFingerprint.autograph) positiveSignals.push('Autograph aligned');
+    } else {
+      score -= 5;
+      negativeSignals.push('Autograph mismatch');
+    }
   }
   if (listingFingerprint.memorabilia !== null && candidateFingerprint.memorabilia !== null) {
-    score += listingFingerprint.memorabilia === candidateFingerprint.memorabilia ? 5 : -5;
+    if (listingFingerprint.memorabilia === candidateFingerprint.memorabilia) {
+      score += 5;
+      if (listingFingerprint.memorabilia) positiveSignals.push('Memorabilia aligned');
+    } else {
+      score -= 5;
+      negativeSignals.push('Memorabilia mismatch');
+    }
   }
   if (listingFingerprint.rookie !== null && candidateFingerprint.rookie !== null) {
-    score += listingFingerprint.rookie === candidateFingerprint.rookie ? 4 : -4;
+    if (listingFingerprint.rookie === candidateFingerprint.rookie) {
+      score += 4;
+      if (listingFingerprint.rookie) positiveSignals.push('Rookie aligned');
+    } else {
+      score -= 4;
+      negativeSignals.push('Rookie mismatch');
+    }
   }
   if (listingFingerprint.brand && candidateFingerprint.brand) {
-    score += listingFingerprint.brand === candidateFingerprint.brand ? 8 : -6;
+    if (listingFingerprint.brand === candidateFingerprint.brand) {
+      score += 8;
+      positiveSignals.push(`Brand ${candidateFingerprint.brand}`);
+    } else {
+      score -= 6;
+      negativeSignals.push(`Brand mismatch (${listingFingerprint.brand} vs ${candidateFingerprint.brand})`);
+    }
   }
 
   const overlap = listingFingerprint.tokens.filter((token) => candidateFingerprint.tokens.includes(token));
   score += Math.min(10, overlap.length);
+  if (overlap.length > 0) {
+    positiveSignals.push(`${Math.min(10, overlap.length)} shared text token${overlap.length === 1 ? '' : 's'}`);
+  }
 
-  return score;
+  return {
+    score,
+    positiveSignals: positiveSignals.slice(0, 5),
+    negativeSignals: negativeSignals.slice(0, 5),
+  };
 }
 
 function buildFingerprintFromText(

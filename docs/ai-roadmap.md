@@ -27,6 +27,9 @@ Use more AI in a way that increases purchase-ready hits and decreases manual cor
 - Added a shared fingerprint helper in `src/lib/card-fingerprint.ts`.
 - OpenAI exact-match verification now receives listing and SCP candidate fingerprints.
 - Candidate payloads now include a fingerprint similarity signal before model judgment.
+- Needs Review rows now store a structured review reason so you can see why the model stopped short of auto-accept.
+- Review options now carry positive and negative fingerprint signals for faster human selection.
+- Review resolutions now log top-1/top-3 hit data so future tuning can be measured instead of guessed.
 
 ## Near-term target
 The next code changes should reduce the number of bad cards that reach Needs Review without suppressing real deals.
