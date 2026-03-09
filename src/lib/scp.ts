@@ -197,12 +197,15 @@ function mapScpRow(row: Record<string, unknown>, source: 'api' | 'cache'): ScpCa
 function penniesOrMoney(input: unknown): number | null {
   if (typeof input === 'number') {
     if (!Number.isFinite(input)) return null;
-    return input > 1000 ? Number((input / 100).toFixed(2)) : input;
+    if (Number.isInteger(input)) {
+      return Number((input / 100).toFixed(2));
+    }
+    return Number(input.toFixed(2));
   }
   if (typeof input === 'string') {
     const trimmed = input.trim();
     if (!trimmed) return null;
-    if (/^\d+$/.test(trimmed) && trimmed.length >= 3) {
+    if (/^\d+$/.test(trimmed)) {
       return Number((Number(trimmed) / 100).toFixed(2));
     }
     return parseMoney(trimmed);
@@ -213,16 +216,39 @@ function penniesOrMoney(input: unknown): number | null {
 function scoreScpText(query: string, candidate: ScpCandidate): number {
   const haystack = `${candidate.productName} ${candidate.consoleName ?? ''}`.toLowerCase();
   const queryTokens = tokenizeLoose(query);
+  const normalizedQuery = ` ${queryTokens.join(' ')} `;
+  const bracketText = extractBracketText(candidate.productName);
+  const bracketTokens = tokenizeLoose(bracketText).filter((token) => !/^#/.test(token));
+  const hasParallelCandidate = bracketText.length > 0;
+  const queryMentionsParallel = bracketTokens.some((token) => token.length > 2 && normalizedQuery.includes(` ${token} `));
+  const querySignalsBase = /(^|\s)(base|silver|standard|ungraded|raw)(\s|$)/i.test(normalizedQuery);
+
   let score = 0;
   for (const token of queryTokens) {
     if (token.length <= 1) continue;
     if (haystack.includes(token)) score += token.startsWith('#') ? 16 : 4;
   }
+
   const titleNumber = query.match(/#([a-z0-9-]+)/i)?.[0]?.toLowerCase();
   if (titleNumber && haystack.includes(titleNumber)) score += 14;
-  if (/\[[^\]]+\]/.test(candidate.productName)) score += 2;
+
+  if (hasParallelCandidate) {
+    if (queryMentionsParallel) {
+      score += 6;
+    } else {
+      score -= 10;
+    }
+  } else if (!queryMentionsParallel || querySignalsBase) {
+    score += 8;
+  }
+
   if (candidate.ungradedSell !== null) score += 1;
   return score;
+}
+
+function extractBracketText(value: string): string {
+  const match = value.match(/\[([^\]]+)\]/);
+  return match ? match[1] : '';
 }
 
 function splitCsvLine(line: string): string[] {
