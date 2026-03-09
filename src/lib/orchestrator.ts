@@ -433,65 +433,15 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
   }
 
   const scpQueries = buildScpQueries(listing, details, filters, ximilarHints?.titleHints ?? []);
-  const scpSearchOutcome = await withProviderRetries('scp', 'candidate search', () => searchSportsCardsProCandidatesMulti(scpQueries, 10), {
-    scanId,
-    stage: 'matching_scp',
-    attempts: 2,
-  });
-  if (!scpSearchOutcome.ok) {
-    const rejectionReason = `SCP lookup unavailable: ${scpSearchOutcome.failure.message}`;
-    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: rejectionReason });
-    await addScanEvent(scanId, scpSearchOutcome.failure.recoverable ? 'warning' : 'error', 'matching_scp', rejectionReason, listing.title);
-    return;
-  }
-
-  const { candidates: baseCandidates, queryHits } = scpSearchOutcome.value;
-  if (queryHits.length > 0) {
-    await incrementUsage('scp', queryHits.length);
-    await appendMetrics(scanId, { scpCalls: queryHits.length });
-    await addScanEvent(
-      scanId,
-      'info',
-      'matching_scp',
-      'Ran SCP lookup queries',
-      queryHits.map((row) => `${row.query} (${row.count})`).join('\n'),
-    );
-  }
-
-  let candidatePool = [...baseCandidates];
-  const hydrateOutcome = await withProviderRetries(
-    'scp',
-    'candidate hydration',
-    () => hydrateSportsCardsProCandidates(
-      rankScpCandidatesLocally(listing, details, filters, baseCandidates, reviewResolutionMemory, cardNumberOutcomeMemory)
-        .slice(0, 5)
-        .map((row) => row.candidate.productId),
-    ),
-    {
-      scanId,
-      stage: 'matching_scp',
-      attempts: 2,
-    },
-  );
-  if (!hydrateOutcome.ok) {
-    const rejectionReason = `SCP hydration unavailable: ${hydrateOutcome.failure.message}`;
-    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: rejectionReason });
-    await addScanEvent(scanId, hydrateOutcome.failure.recoverable ? 'warning' : 'error', 'matching_scp', rejectionReason, listing.title);
-    return;
-  }
-
-  const hydratedBase = hydrateOutcome.value;
-  if (hydratedBase.length > 0) {
-    await incrementUsage('scp', hydratedBase.length);
-    await appendMetrics(scanId, { scpCalls: hydratedBase.length });
-    candidatePool = mergeCandidates(candidatePool, hydratedBase);
-  }
+  let candidatePool: ScpCandidate[] = [];
+  let hydratedBase: ScpCandidate[] = [];
 
   const cacheHints = buildScpCacheHints(listing, details, filters, candidatePool, hydratedBase, scpQueries, ximilarHints?.titleHints ?? []);
   const matchedCaches = await findScpCacheMatches(cacheHints, 4);
   if (cacheHints.length > 0) {
     await addScanEvent(scanId, 'info', 'matching_scp', 'Inferred SCP cache targets', cacheHints.slice(0, 8).join(' • '));
   }
+
   const loadedCacheNames: string[] = [];
   for (const cacheEntry of matchedCaches.slice(0, 3)) {
     if (!cacheEntry.storagePath) continue;
@@ -505,7 +455,73 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     }
   }
   if (loadedCacheNames.length > 0) {
-    await addScanEvent(scanId, 'info', 'matching_scp', 'Loaded SCP set cache', loadedCacheNames.join(' • '));
+    await addScanEvent(scanId, 'info', 'matching_scp', 'Loaded SCP set cache before live API lookup', loadedCacheNames.join(' • '));
+  }
+
+  const shouldUseLiveScpApi = candidatePool.length < 3;
+  if (shouldUseLiveScpApi) {
+    const scpSearchOutcome = await withProviderRetries('scp', 'candidate search', () => searchSportsCardsProCandidatesMulti(scpQueries, 10), {
+      scanId,
+      stage: 'matching_scp',
+      attempts: 2,
+    });
+    if (!scpSearchOutcome.ok) {
+      if (candidatePool.length === 0) {
+        const rejectionReason = `SCP lookup unavailable: ${scpSearchOutcome.failure.message}`;
+        await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: rejectionReason });
+        await addScanEvent(scanId, scpSearchOutcome.failure.recoverable ? 'warning' : 'error', 'matching_scp', rejectionReason, listing.title);
+        return;
+      }
+      await addScanEvent(scanId, scpSearchOutcome.failure.recoverable ? 'warning' : 'error', 'matching_scp', 'Live SCP lookup unavailable; continuing with cached CSV candidates only', scpSearchOutcome.failure.message);
+    } else {
+      const { candidates: baseCandidates, queryHits } = scpSearchOutcome.value;
+      if (queryHits.length > 0) {
+        await incrementUsage('scp', queryHits.length);
+        await appendMetrics(scanId, { scpCalls: queryHits.length });
+        await addScanEvent(
+          scanId,
+          'info',
+          'matching_scp',
+          'Ran live SCP lookup queries after cache pass',
+          queryHits.map((row) => `${row.query} (${row.count})`).join('\n'),
+        );
+      }
+
+      candidatePool = mergeCandidates(candidatePool, baseCandidates);
+      const hydrateIds = rankScpCandidatesLocally(listing, details, filters, candidatePool, reviewResolutionMemory, cardNumberOutcomeMemory)
+        .slice(0, 5)
+        .map((row) => row.candidate.productId);
+      if (hydrateIds.length > 0) {
+        const hydrateOutcome = await withProviderRetries(
+          'scp',
+          'candidate hydration',
+          () => hydrateSportsCardsProCandidates(hydrateIds),
+          {
+            scanId,
+            stage: 'matching_scp',
+            attempts: 2,
+          },
+        );
+        if (!hydrateOutcome.ok) {
+          if (candidatePool.length === 0) {
+            const rejectionReason = `SCP hydration unavailable: ${hydrateOutcome.failure.message}`;
+            await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: rejectionReason });
+            await addScanEvent(scanId, hydrateOutcome.failure.recoverable ? 'warning' : 'error', 'matching_scp', rejectionReason, listing.title);
+            return;
+          }
+          await addScanEvent(scanId, hydrateOutcome.failure.recoverable ? 'warning' : 'error', 'matching_scp', 'Live SCP hydration unavailable; continuing with cached CSV candidates only', hydrateOutcome.failure.message);
+        } else {
+          hydratedBase = hydrateOutcome.value;
+          if (hydratedBase.length > 0) {
+            await incrementUsage('scp', hydratedBase.length);
+            await appendMetrics(scanId, { scpCalls: hydratedBase.length });
+            candidatePool = mergeCandidates(candidatePool, hydratedBase);
+          }
+        }
+      }
+    }
+  } else {
+    await addScanEvent(scanId, 'info', 'matching_scp', 'Skipped live SCP API lookup because cached CSV candidates were already available', `${candidatePool.length} cache candidate${candidatePool.length === 1 ? '' : 's'} retained`);
   }
 
   if (candidatePool.length === 0 && !override) {

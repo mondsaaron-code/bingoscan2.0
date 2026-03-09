@@ -222,8 +222,10 @@ function sportToCategoryId(_sport: string): string {
 
 function buildEbayFilter(filters: SearchForm): string {
   const chunks: string[] = [];
-  if (filters.maxPurchasePrice) {
-    chunks.push(`price:[..${filters.maxPurchasePrice}]`);
+  const minPrice = filters.minPurchasePrice && filters.minPurchasePrice > 0 ? filters.minPurchasePrice : null;
+  const maxPrice = filters.maxPurchasePrice && filters.maxPurchasePrice > 0 ? filters.maxPurchasePrice : null;
+  if (minPrice !== null || maxPrice !== null) {
+    chunks.push(`price:[${minPrice ?? '..'}..${maxPrice ?? '..'}]`);
   }
   if (filters.listingMode === 'auction') {
     chunks.push('buyingOptions:{AUCTION}');

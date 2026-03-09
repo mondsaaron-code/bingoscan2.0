@@ -33,6 +33,7 @@ export type SearchForm = {
   conditionMode: CardConditionMode;
   listingMode: ListingMode;
   auctionHours?: number | null;
+  minPurchasePrice?: number | null;
   maxPurchasePrice?: number | null;
   minProfit?: number | null;
   minMarginPct?: number | null;

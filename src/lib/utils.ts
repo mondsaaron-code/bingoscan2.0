@@ -194,6 +194,7 @@ export function scoreListingPriority(args: {
     numberedCard?: boolean;
     conditionMode?: 'raw' | 'graded' | 'any';
     listingMode?: 'buy_now' | 'auction';
+    minPurchasePrice?: number | null;
     maxPurchasePrice?: number | null;
   };
 }): number {

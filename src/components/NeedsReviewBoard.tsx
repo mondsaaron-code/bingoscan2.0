@@ -21,7 +21,7 @@ export function NeedsReviewBoard({
       <div className="spread">
         <div>
           <h2 className="section-title">Needs Review</h2>
-          <div className="muted small">Side-by-side SCP comparison for uncertain matches. Pick the correct card, suppress the listing, or mark the logic as bad.</div>
+          <div className="muted small">Side-by-side SCP comparison for uncertain matches. Pick the correct card, suppress the listing, or mark the logic as bad. Correct matches that are not profitable will still be tracked for future learning and removed from Deals / Needs Review.</div>
         </div>
         <div className="row-actions">
           <div className="badge">{rows.length} listings</div>
@@ -152,7 +152,7 @@ export function NeedsReviewBoard({
                         <div className="small muted">Margin {toPct(margin)} · Grade 9 upside {toCurrency(grade9Upside)} · PSA 10 upside {toCurrency(psa10Upside)}</div>
                         <div className="small muted">Grade lane: {optionLane.label} — {optionLane.detail}</div>
                         <div className="row-actions">
-                          <button className="btn btn-primary" onClick={() => onResolveReview(row.id, option.id)}>Use This Match</button>
+                          <button className="btn btn-primary" onClick={() => onResolveReview(row.id, option.id)}>{profit !== null && profit <= 0 ? 'Use This Match & Hide' : 'Use This Match'}</button>
                           {option.scpLink ? <a className="btn btn-ghost" href={option.scpLink} target="_blank" rel="noreferrer">Open SCP</a> : null}
                         </div>
                       </div>

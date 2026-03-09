@@ -135,30 +135,59 @@ export default function DealsPage() {
 
   async function cancelScan() {
     if (!dashboard.activeScan) return;
-    await fetch('/api/scan/cancel', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scanId: dashboard.activeScan.id }),
-    });
-    await loadDashboard();
+    setBanner(null);
+    try {
+      const response = await fetch('/api/scan/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scanId: dashboard.activeScan.id }),
+      });
+      const body = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(body.error ?? 'Unable to cancel scan');
+      await loadDashboard();
+      setBanner('Scan cancelled.');
+    } catch (error) {
+      setBanner(error instanceof Error ? error.message : 'Unable to cancel scan');
+    }
   }
 
   async function setDisposition(ids: string[], disposition: Disposition) {
-    await fetch('/api/scan/disposition', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ids, disposition }),
-    });
-    await loadDashboard();
+    setBanner(null);
+    try {
+      const response = await fetch('/api/scan/disposition', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids, disposition }),
+      });
+      const body = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(body.error ?? 'Unable to update disposition');
+      await loadDashboard();
+      setBanner(`Updated ${ids.length} listing${ids.length === 1 ? '' : 's'} to ${disposition.replace(/_/g, ' ')}.`);
+    } catch (error) {
+      setBanner(error instanceof Error ? error.message : 'Unable to update disposition');
+    }
   }
 
   async function resolveReview(resultId: string, optionId: string) {
-    await fetch('/api/scan/review', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ resultId, optionId }),
-    });
-    await loadDashboard();
+    setBanner(null);
+    try {
+      const response = await fetch('/api/scan/review', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ resultId, optionId }),
+      });
+      const body = (await response.json()) as { error?: string; disposition?: Disposition | null; matchedProductName?: string | null; tracked?: boolean };
+      if (!response.ok) throw new Error(body.error ?? 'Unable to resolve review');
+      await loadDashboard();
+      const suffix = body.disposition === 'not_profitable'
+        ? ' It was tracked as not profitable and removed from Deals / Needs Review.'
+        : body.tracked
+          ? ' The manual match was saved for future learning.'
+          : '';
+      setBanner(`Review saved${body.matchedProductName ? ` for ${body.matchedProductName}` : ''}.${suffix}`);
+    } catch (error) {
+      setBanner(error instanceof Error ? error.message : 'Unable to resolve review');
+    }
   }
 
   async function checkCaches() {

@@ -21,6 +21,7 @@ const schema = z.object({
   conditionMode: z.enum(['raw', 'graded', 'any']),
   listingMode: z.enum(['buy_now', 'auction']),
   auctionHours: z.number().nullable().optional(),
+  minPurchasePrice: z.number().nullable().optional(),
   maxPurchasePrice: z.number().nullable().optional(),
   minProfit: z.number().nullable().optional(),
   minMarginPct: z.number().nullable().optional(),

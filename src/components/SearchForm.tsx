@@ -14,6 +14,7 @@ const defaultFilters: SearchFormType = {
   startYear: null,
   endYear: null,
   auctionHours: null,
+  minPurchasePrice: null,
   maxPurchasePrice: null,
   minProfit: null,
   minMarginPct: null,
@@ -55,6 +56,7 @@ export function SearchForm({ onStart, isBusy }: { onStart: (filters: SearchFormT
         {renderText('Player Name', filters.playerName ?? '', (value) => update('playerName', value || undefined))}
         {renderText('Position', filters.position ?? '', (value) => update('position', value || undefined))}
         {renderText('Team', filters.team ?? '', (value) => update('team', value || undefined))}
+        {renderNumber('Min Purchase Price', filters.minPurchasePrice, (value) => update('minPurchasePrice', value))}
         {renderNumber('Max Purchase Price', filters.maxPurchasePrice, (value) => update('maxPurchasePrice', value))}
         {renderNumber('Min Profit $', filters.minProfit, (value) => update('minProfit', value))}
         {renderNumber('Min Margin %', filters.minMarginPct, (value) => update('minMarginPct', value))}
