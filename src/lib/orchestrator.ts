@@ -16,6 +16,7 @@ import {
   getRecentTitleOutcomeMemory,
   getScanById,
   getEbaySearchPageCount,
+  getNeedsReviewQueueFloor,
   getScanResultMemory,
   getScpCacheCsvTextByStoragePath,
   getSellerOutcomeMemory,
@@ -636,35 +637,62 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
       return;
     }
 
-    const placeholderCandidate = rankedCandidates[0] ?? null;
-    const placeholderProfit = placeholderCandidate?.ungradedSell !== null && placeholderCandidate?.ungradedSell !== undefined
-      ? placeholderCandidate.ungradedSell - listing.total
-      : null;
-    const placeholderMargin = placeholderCandidate?.ungradedSell && placeholderProfit !== null ? (placeholderProfit / listing.total) * 100 : null;
+    const profitableReviewCandidates = rankedCandidates
+      .map((candidate) => {
+        const estimatedProfit = candidate.ungradedSell !== null && candidate.ungradedSell !== undefined
+          ? candidate.ungradedSell - listing.total
+          : null;
+        const estimatedMarginPct = candidate.ungradedSell && estimatedProfit !== null
+          ? (estimatedProfit / listing.total) * 100
+          : null;
+        return { candidate, estimatedProfit, estimatedMarginPct };
+      })
+      .filter((row) => row.estimatedProfit !== null && row.estimatedProfit > 0 && passesThresholds(filters, row.estimatedProfit, row.estimatedMarginPct));
+
+    if (profitableReviewCandidates.length === 0) {
+      await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: 'No profitable SCP options survived review ranking.' });
+      return;
+    }
+
+    const bestReviewCandidate = profitableReviewCandidates
+      .slice()
+      .sort((a, b) => (b.estimatedProfit ?? Number.NEGATIVE_INFINITY) - (a.estimatedProfit ?? Number.NEGATIVE_INFINITY))[0];
+    const queueFloor = await getNeedsReviewQueueFloor(scanId, 20);
+    if (queueFloor.count >= 20 && queueFloor.floorProfit !== null && (bestReviewCandidate.estimatedProfit ?? Number.NEGATIVE_INFINITY) <= queueFloor.floorProfit) {
+      await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: 'Needs Review queue already holds 20 stronger profitable candidates.' });
+      return;
+    }
+
+    const reviewCandidates = [
+      bestReviewCandidate.candidate,
+      ...rankedCandidates.filter((candidate) => candidate.productId !== bestReviewCandidate.candidate.productId),
+    ].slice(0, 3);
+
     const resultId = await insertResultPayload(
       scanId,
       listing,
-      placeholderCandidate,
+      bestReviewCandidate.candidate,
       decision,
       true,
-      placeholderProfit,
-      placeholderMargin,
+      bestReviewCandidate.estimatedProfit,
+      bestReviewCandidate.estimatedMarginPct,
       listingQuality,
       details,
       sellerOutcome,
-      scoreListingAgainstFamilyMemory({ ebayTitle: listing.title, scpProductName: placeholderCandidate?.productName ?? null }, familyOutcomeMemory),
+      scoreListingAgainstFamilyMemory({ ebayTitle: listing.title, scpProductName: bestReviewCandidate.candidate.productName }, familyOutcomeMemory),
       playerMemorySignal,
       auctionMemorySignal,
       priceBandMemorySignal,
-      scoreScpCandidateAgainstCardNumberMemory({ ebayTitle: `${listing.title} ${details?.subtitle ?? ''}`.trim(), scpProductName: placeholderCandidate?.productName ?? null, requestedCardNumber: filters.cardNumber ?? null }, cardNumberOutcomeMemory),
+      scoreScpCandidateAgainstCardNumberMemory({ ebayTitle: `${listing.title} ${details?.subtitle ?? ''}`.trim(), scpProductName: bestReviewCandidate.candidate.productName, requestedCardNumber: filters.cardNumber ?? null }, cardNumberOutcomeMemory),
     );
     await insertReviewOptions(
       resultId,
-      rankedCandidates.slice(0, 3).map((candidate, index) => reviewOptionPayload(candidate, index + 1, decision.confidence)),
+      reviewCandidates.map((candidate, index) => reviewOptionPayload(candidate, index + 1, decision.confidence)),
     );
     await appendMetrics(scanId, { needsReview: 1 });
     await updateCandidate(candidateId, { stage: 'needs_review', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning });
-    await addScanEvent(scanId, 'warning', 'ai_verifying', 'Sent listing to Needs Review', `${listing.title}\n${decision.reasoning}`);
+    await addScanEvent(scanId, 'warning', 'ai_verifying', 'Sent listing to Needs Review', `${listing.title}
+${decision.reasoning}`);
     return;
   }
 

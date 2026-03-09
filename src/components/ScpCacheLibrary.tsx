@@ -5,13 +5,13 @@ export function ScpCacheLibrary({ caches }: { caches: ScpCacheEntry[] }) {
     <div className="card card-pad stack">
       <div className="spread">
         <div>
-          <div className="section-title">SCP Cache Library</div>
-          <div className="muted small">Uploaded SportsCardsPro set files available for faster matching.</div>
+          <div className="section-title">Recent SCP Uploads</div>
+          <div className="muted small">Showing the last two CSV files manually uploaded in the past two weeks.</div>
         </div>
-        <div className="badge">{caches.length} cached set{caches.length === 1 ? '' : 's'}</div>
+        <div className="badge">{caches.length} shown</div>
       </div>
       {caches.length === 0 ? (
-        <div className="muted small">No SCP set caches uploaded yet.</div>
+        <div className="muted small">No recent SCP CSV uploads in the past two weeks.</div>
       ) : (
         <div className="stack" style={{ gap: 10 }}>
           {caches.map((cache) => (
@@ -22,8 +22,8 @@ export function ScpCacheLibrary({ caches }: { caches: ScpCacheEntry[] }) {
                   <div className="muted small">{cache.cacheKey}</div>
                 </div>
                 <div className="small muted" style={{ textAlign: 'right' }}>
+                  <div>Uploaded {formatDate(cache.createdAt ?? cache.updatedAt)}</div>
                   <div>Updated {formatDate(cache.updatedAt)}</div>
-                  {cache.downloadedAt ? <div>Downloaded {formatDate(cache.downloadedAt)}</div> : null}
                 </div>
               </div>
               {cache.sourceConsoleUrl ? (

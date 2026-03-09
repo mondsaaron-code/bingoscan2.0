@@ -8,6 +8,7 @@ import { ResultsTable } from '@/components/ResultsTable';
 import { DiagnosticsPanel } from '@/components/DiagnosticsPanel';
 import { ScpCacheUploader } from '@/components/ScpCacheUploader';
 import { ScpCacheLibrary } from '@/components/ScpCacheLibrary';
+import { ScpCacheTracker } from '@/components/ScpCacheTracker';
 import { NeedsReviewBoard } from '@/components/NeedsReviewBoard';
 import type { DashboardSnapshot, Disposition, SearchForm as SearchFormType } from '@/types/app';
 import { toCurrency, toTitleLabel } from '@/lib/utils';
@@ -24,6 +25,17 @@ const EMPTY_DASHBOARD: DashboardSnapshot = {
     stageTimings: [],
   },
   scpCaches: [],
+  scpCacheTracker: {
+    totalFiles: 0,
+    recentUploads: 0,
+    updatedRecently: 0,
+    staleFiles: 0,
+    errorCount: 0,
+    lastUpdatedAt: null,
+    lastCheckAt: null,
+    lastCheckStatus: null,
+    lastCheckMessage: null,
+  },
   usage: {
     openAiCostTodayUsd: null,
     ebayCallsToday: 0,
@@ -41,6 +53,7 @@ export default function DealsPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
+  const [checkingCaches, setCheckingCaches] = useState(false);
   const intervalRef = useRef<number | null>(null);
 
   const loadDashboard = useCallback(async () => {
@@ -134,6 +147,22 @@ export default function DealsPage() {
     await loadDashboard();
   }
 
+  async function checkCaches() {
+    setCheckingCaches(true);
+    setBanner(null);
+    try {
+      const response = await fetch('/api/scp/cache-check', { method: 'POST' });
+      const body = (await response.json()) as { error?: string };
+      if (!response.ok) throw new Error(body.error ?? 'Unable to check SCP cache freshness');
+      await loadDashboard();
+      setBanner('SCP cache freshness check complete.');
+    } catch (error) {
+      setBanner(error instanceof Error ? error.message : 'Unable to check SCP cache freshness');
+    } finally {
+      setCheckingCaches(false);
+    }
+  }
+
   const scanContext = dashboard.activeScan ?? dashboard.latestScan;
 
   const kpis = useMemo(() => {
@@ -144,11 +173,10 @@ export default function DealsPage() {
       { label: 'OpenAI Calls Today', value: dashboard.usage.openAiCallsToday },
       { label: 'Ximilar Calls Today', value: dashboard.usage.ximilarCallsToday },
       { label: 'Deals Found', value: scanContext?.metrics.dealsFound ?? 0 },
-      { label: 'Needs Review', value: scanContext?.metrics.needsReview ?? 0 },
+      { label: 'Needs Review', value: dashboard.needsReviewResults.length },
       { label: 'Candidates Evaluated', value: scanContext?.metrics.candidatesEvaluated ?? 0 },
     ];
   }, [dashboard, scanContext]);
-
 
   const progress = useMemo(() => {
     const currentResults = (scanContext?.metrics.dealsFound ?? 0) + (scanContext?.metrics.needsReview ?? 0);
@@ -270,9 +298,10 @@ export default function DealsPage() {
 
         <SearchForm onStart={startScan} isBusy={busy || Boolean(dashboard.activeScan)} />
         <div className="grid grid-2">
-          <ScpCacheUploader />
-          <ScpCacheLibrary caches={dashboard.scpCaches} />
+          <ScpCacheUploader onUploaded={loadDashboard} />
+          <ScpCacheTracker tracker={dashboard.scpCacheTracker} onCheck={checkCaches} isChecking={checkingCaches} />
         </div>
+        <ScpCacheLibrary caches={dashboard.scpCaches} />
 
         <ResultsTable title="Deals" rows={dashboard.visibleResults} onDisposition={setDisposition} />
         <NeedsReviewBoard

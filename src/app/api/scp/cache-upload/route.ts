@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { parseScpCsv } from '@/lib/scp';
-import { upsertScpCacheCsv } from '@/lib/db';
+import { runScpCacheFreshnessCheck, upsertScpCacheCsv } from '@/lib/db';
 
 export async function POST(request: Request) {
   try {
@@ -24,12 +24,26 @@ export async function POST(request: Request) {
     }
 
     const storagePath = await upsertScpCacheCsv(consoleName, csvText, sourceConsoleUrl);
+    const summary = await runScpCacheFreshnessCheck('upload', {
+      force: true,
+      message: `Uploaded ${parsed.length} cached SCP rows for ${consoleName}.`,
+    });
     return NextResponse.json({
       ok: true,
       storagePath,
+      summary,
       message: `Uploaded ${parsed.length} cached SCP rows for ${consoleName}.`,
     });
   } catch (error) {
+    try {
+      await runScpCacheFreshnessCheck('upload', {
+        force: true,
+        message: error instanceof Error ? error.message : 'Unable to upload SCP CSV cache',
+        errorCount: 1,
+      });
+    } catch {
+      // ignore secondary logging failures
+    }
     return NextResponse.json(
       { error: error instanceof Error ? error.message : 'Unable to upload SCP CSV cache' },
       { status: 500 },

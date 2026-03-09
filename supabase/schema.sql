@@ -77,7 +77,7 @@ create table if not exists public.scan_results (
   seller_feedback_score integer,
   listing_quality_score numeric(6,2),
   reasoning text,
-  disposition text check (disposition in ('purchased','suppress_90_days','bad_logic')),
+  disposition text check (disposition in ('purchased','suppress_90_days','bad_logic','not_profitable')),
   created_at timestamptz not null default now()
 );
 
@@ -98,7 +98,7 @@ create table if not exists public.scan_review_options (
 create table if not exists public.result_dispositions (
   id uuid primary key default gen_random_uuid(),
   scan_result_id uuid not null references public.scan_results(id) on delete cascade,
-  disposition text not null check (disposition in ('purchased','suppress_90_days','bad_logic')),
+  disposition text not null check (disposition in ('purchased','suppress_90_days','bad_logic','not_profitable')),
   created_at timestamptz not null default now()
 );
 
@@ -125,6 +125,20 @@ create table if not exists public.scp_set_cache_index (
   downloaded_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
+);
+
+create table if not exists public.scp_cache_refresh_runs (
+  id uuid primary key default gen_random_uuid(),
+  trigger text not null check (trigger in ('login_auto','manual_check','upload')),
+  status text not null check (status in ('ok','warning','error')),
+  total_files integer not null default 0,
+  recent_uploads integer not null default 0,
+  updated_recently integer not null default 0,
+  stale_files integer not null default 0,
+  error_count integer not null default 0,
+  last_updated_at timestamptz,
+  message text,
+  created_at timestamptz not null default now()
 );
 
 create table if not exists public.api_usage_daily (
@@ -160,6 +174,7 @@ alter table public.result_dispositions enable row level security;
 alter table public.ebay_item_dedupe enable row level security;
 alter table public.manual_match_overrides enable row level security;
 alter table public.scp_set_cache_index enable row level security;
+alter table public.scp_cache_refresh_runs enable row level security;
 alter table public.api_usage_daily enable row level security;
 alter table public.app_errors enable row level security;
 
@@ -177,6 +192,7 @@ create policy "authenticated full access result dispositions" on public.result_d
 create policy "authenticated full access ebay_item_dedupe" on public.ebay_item_dedupe for all to authenticated using (true) with check (true);
 create policy "authenticated full access manual_match_overrides" on public.manual_match_overrides for all to authenticated using (true) with check (true);
 create policy "authenticated full access scp_set_cache_index" on public.scp_set_cache_index for all to authenticated using (true) with check (true);
+create policy "authenticated full access scp_cache_refresh_runs" on public.scp_cache_refresh_runs for all to authenticated using (true) with check (true);
 create policy "authenticated full access api_usage_daily" on public.api_usage_daily for all to authenticated using (true) with check (true);
 create policy "authenticated full access app_errors" on public.app_errors for all to authenticated using (true) with check (true);
 

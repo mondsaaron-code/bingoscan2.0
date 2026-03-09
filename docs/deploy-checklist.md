@@ -2,7 +2,12 @@
 
 ## Supabase
 
-Run `supabase/schema.sql`.
+Run `supabase/schema.sql` for a fresh project.
+
+If your project is already running from an older pass, also run these migrations in order:
+
+- `supabase/migrations/20260308_pass13_seller_title_memory.sql`
+- `supabase/migrations/20260309_pass25_review_cache_tracker.sql`
 
 Create your login user in Supabase Auth.
 
@@ -42,8 +47,6 @@ The worker will stop a scan with a specific warning if one of these configured d
 
 redeploy after saving the new values in Vercel.
 
-This pass also includes a browser-safe Supabase client env fix, so the login page now reads `NEXT_PUBLIC_*` variables through direct static references.
-
 ## GitHub
 
 Push as a fresh repo.
@@ -59,37 +62,22 @@ Deploy.
 
 Use the email/password you created in Supabase Auth.
 
-## Notes on SportsCardsPro set cache
+## Notes on SportsCardsPro CSVs
 
-The app supports reading set CSV files from the Supabase Storage bucket `scp-csv-cache` when a matching set file exists. The expected storage path is:
+The app can automatically **check freshness** of uploaded SCP CSV files on login and when you press **Check Freshness** on the Deals page.
 
-- `sets/<slugified-console-name>.csv`
-
-Examples:
-
-- `sets/football-cards-2025-panini-donruss.csv`
-- `sets/basketball-cards-2024-panini-prizm.csv`
-
-When cached files exist, the scan engine now does more than exact slug matching:
-
-- exact console-name lookup
-- fuzzy cache matching based on listing title, filter inputs, hydrated SCP candidates, and Ximilar hints
-- loading up to two strong cache matches into the SCP candidate pool before OpenAI verification
-
-That means uploaded set files should be used more often automatically, even when the eBay listing wording is messy.
+The app does **not** yet automatically download premium SCP CSV files from your account. Manual SCP download/upload is still required when a cache file is stale.
 
 ## SCP CSV uploads in the app
 
 After deployment, you can upload a SportsCardsPro CSV directly from the Deals page. The app stores it in the `scp-csv-cache` bucket and indexes it in `scp_set_cache_index`, so later scans can merge cached set rows before calling OpenAI.
 
-The Deals page now also shows a simple SCP Cache Library panel so you can confirm which cached set files are currently indexed.
+The Deals page now shows:
 
-## Manual review memory
+- the last two SCP CSV uploads from the past two weeks
+- a freshness tracker with total files, updated-in-24h count, stale count, last update time, and recent refresh-check errors
 
-Manual review picks save a reusable override automatically, so when you correct a match once, future near-identical titles can auto-apply that product without sending the row back to review.
+## Manual review behavior
 
-
-## Pass 13 SQL
-Run the migration before deploying this pass:
-
-- `supabase/migrations/20260308_pass13_seller_title_memory.sql`
+- Needs Review only shows the top 20 profitable review candidates.
+- If you manually choose an SCP match that still is not profitable, the card is automatically marked `Not Profitable` instead of moving into the Deals table.

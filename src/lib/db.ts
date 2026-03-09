@@ -11,6 +11,7 @@ import type {
   ScanResultRow,
   ScanSummary,
   ScpCacheEntry,
+  ScpCacheTracker,
   SearchForm,
   ScanStatus,
 } from '@/types/app';
@@ -83,6 +84,20 @@ type CardNumberOutcomeMemoryDbRow = {
   ebayTitle: string;
   scpProductName: string | null;
   disposition: Disposition;
+};
+
+type ScpCacheRefreshRun = {
+  id: string;
+  trigger: 'login_auto' | 'manual_check' | 'upload';
+  status: 'ok' | 'warning' | 'error';
+  totalFiles: number;
+  recentUploads: number;
+  updatedRecently: number;
+  staleFiles: number;
+  errorCount: number;
+  lastUpdatedAt: string | null;
+  message: string | null;
+  createdAt: string;
 };
 
 export type SellerOutcomeMemory = {
@@ -393,14 +408,39 @@ export async function setDisposition(resultIds: string[], disposition: Dispositi
   if (dispositionError) throw dispositionError;
 }
 
+function passesThresholdsForFilters(filters: SearchForm, estimatedProfit: number | null, estimatedMarginPct: number | null): boolean {
+  if (estimatedProfit === null) return false;
+  if (estimatedProfit <= 0) return false;
+  if (filters.minProfit && estimatedProfit < filters.minProfit) return false;
+  if (filters.minMarginPct && (estimatedMarginPct ?? 0) < filters.minMarginPct) return false;
+  return true;
+}
+
 export async function resolveReview(resultId: string, optionId: string): Promise<void> {
   const supabase = getSupabase();
   const [{ data: option, error: optionError }, { data: resultRow, error: resultError }] = await Promise.all([
     supabase.from('scan_review_options').select('*').eq('id', optionId).single(),
-    supabase.from('scan_results').select('ebay_title').eq('id', resultId).single(),
+    supabase.from('scan_results').select('ebay_title, total_purchase_price, scan_id').eq('id', resultId).single(),
   ]);
   if (optionError) throw optionError;
   if (resultError) throw resultError;
+
+  const { data: scanRow, error: scanError } = await supabase
+    .from('scans')
+    .select('filters')
+    .eq('id', String(resultRow.scan_id))
+    .single();
+  if (scanError) throw scanError;
+
+  const filters = safeJsonParse<SearchForm>(scanRow?.filters, { sport: 'Football', conditionMode: 'raw', listingMode: 'buy_now' });
+  const totalPurchasePrice = Number(resultRow.total_purchase_price ?? 0);
+  const scpUngradedSell = option.scp_ungraded_sell === null ? null : Number(option.scp_ungraded_sell);
+  const estimatedProfit = scpUngradedSell === null ? null : scpUngradedSell - totalPurchasePrice;
+  const estimatedMarginPct = scpUngradedSell !== null && totalPurchasePrice > 0 && estimatedProfit !== null
+    ? (estimatedProfit / totalPurchasePrice) * 100
+    : null;
+  const profitable = passesThresholdsForFilters(filters, estimatedProfit, estimatedMarginPct);
+  const disposition = profitable ? null : 'not_profitable';
 
   const { error: updateError } = await supabase
     .from('scan_results')
@@ -412,9 +452,20 @@ export async function resolveReview(resultId: string, optionId: string): Promise
       scp_ungraded_sell: option.scp_ungraded_sell,
       scp_grade_9: option.scp_grade_9,
       scp_psa_10: option.scp_psa_10,
+      estimated_profit: estimatedProfit,
+      estimated_margin_pct: estimatedMarginPct,
+      disposition,
     })
     .eq('id', resultId);
   if (updateError) throw updateError;
+
+  if (disposition) {
+    const { error: dispositionError } = await supabase.from('result_dispositions').insert({
+      scan_result_id: resultId,
+      disposition,
+    });
+    if (dispositionError) throw dispositionError;
+  }
 
   if (resultRow?.ebay_title) {
     await saveManualMatchOverride(String(resultRow.ebay_title), String(option.scp_product_id), String(option.scp_product_name));
@@ -435,6 +486,26 @@ export async function getScanResultMemory(scanId: string): Promise<Array<{ ebayT
     scpProductName: row.scp_product_name ? String(row.scp_product_name) : null,
     needsReview: Boolean(row.needs_review),
   }));
+}
+
+export async function getNeedsReviewQueueFloor(scanId: string, limit = 20): Promise<{ count: number; floorProfit: number | null }> {
+  const { data, error } = await getSupabase()
+    .from('scan_results')
+    .select('estimated_profit')
+    .eq('scan_id', scanId)
+    .eq('needs_review', true)
+    .is('disposition', null)
+    .gt('estimated_profit', 0)
+    .order('estimated_profit', { ascending: false })
+    .limit(limit);
+  if (error) throw error;
+  const profits = ((data ?? []) as Array<Record<string, unknown>>)
+    .map((row) => row.estimated_profit === null ? null : Number(row.estimated_profit))
+    .filter((value): value is number => value !== null && Number.isFinite(value));
+  return {
+    count: profits.length,
+    floorProfit: profits.length >= limit ? profits[profits.length - 1] : null,
+  };
 }
 
 export async function getRecentBadLogicPatterns(limit = 250): Promise<BadLogicMemoryRow[]> {
@@ -712,14 +783,146 @@ export async function getScpCacheCsvTextByStoragePath(storagePath: string): Prom
   return await data.text();
 }
 
-export async function listScpCaches(limit = 12): Promise<ScpCacheEntry[]> {
+export async function listScpCaches(limit = 2, recentWindowDays = 14): Promise<ScpCacheEntry[]> {
   const { data, error } = await getSupabase()
     .from('scp_set_cache_index')
-    .select('id,cache_key,console_name,source_console_url,storage_path,downloaded_at,updated_at')
+    .select('id,cache_key,console_name,source_console_url,storage_path,downloaded_at,created_at,updated_at')
     .order('updated_at', { ascending: false })
-    .limit(limit);
+    .limit(50);
   if (error) throw error;
-  return ((data ?? []) as Array<Record<string, unknown>>).map(mapScpCacheEntry);
+
+  const cutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
+  return ((data ?? []) as Array<Record<string, unknown>>)
+    .map(mapScpCacheEntry)
+    .filter((entry) => {
+      if (!entry.createdAt) return false;
+      const created = new Date(entry.createdAt).getTime();
+      return Number.isFinite(created) && created >= cutoff;
+    })
+    .slice(0, limit);
+}
+
+async function createScpCacheRefreshRun(payload: {
+  trigger: 'login_auto' | 'manual_check' | 'upload';
+  status: 'ok' | 'warning' | 'error';
+  totalFiles: number;
+  recentUploads: number;
+  updatedRecently: number;
+  staleFiles: number;
+  errorCount: number;
+  lastUpdatedAt: string | null;
+  message: string | null;
+}): Promise<void> {
+  const { error } = await getSupabase().from('scp_cache_refresh_runs').insert({
+    trigger: payload.trigger,
+    status: payload.status,
+    total_files: payload.totalFiles,
+    recent_uploads: payload.recentUploads,
+    updated_recently: payload.updatedRecently,
+    stale_files: payload.staleFiles,
+    error_count: payload.errorCount,
+    last_updated_at: payload.lastUpdatedAt,
+    message: payload.message,
+  });
+  if (error) throw error;
+}
+
+async function calculateScpCacheTrackerSummary(): Promise<ScpCacheTracker> {
+  const supabase = getSupabase();
+  const [{ data: caches, error: cacheError }, { data: lastRun, error: runError }, { data: errorRuns, error: errorRunsError }] = await Promise.all([
+    supabase.from('scp_set_cache_index').select('id, created_at, downloaded_at, updated_at').order('updated_at', { ascending: false }).limit(500),
+    supabase.from('scp_cache_refresh_runs').select('status, message, created_at').order('created_at', { ascending: false }).limit(1).maybeSingle(),
+    supabase.from('scp_cache_refresh_runs').select('error_count, status').gte('created_at', new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString()),
+  ]);
+  if (cacheError) throw cacheError;
+  if (runError) throw runError;
+  if (errorRunsError) throw errorRunsError;
+
+  const now = Date.now();
+  const recentUploadCutoff = now - 14 * 24 * 60 * 60 * 1000;
+  const updatedCutoff = now - 24 * 60 * 60 * 1000;
+  let totalFiles = 0;
+  let recentUploads = 0;
+  let updatedRecently = 0;
+  let staleFiles = 0;
+  let lastUpdatedAt: string | null = null;
+
+  for (const row of (caches ?? []) as Array<Record<string, unknown>>) {
+    totalFiles += 1;
+    const createdAt = row.created_at ? new Date(String(row.created_at)).getTime() : Number.NaN;
+    if (Number.isFinite(createdAt) && createdAt >= recentUploadCutoff) recentUploads += 1;
+    const freshnessSource = row.updated_at ? String(row.updated_at) : row.downloaded_at ? String(row.downloaded_at) : null;
+    if (freshnessSource) {
+      const freshnessMs = new Date(freshnessSource).getTime();
+      if (Number.isFinite(freshnessMs) && freshnessMs >= updatedCutoff) updatedRecently += 1;
+      if (!lastUpdatedAt || freshnessSource > lastUpdatedAt) lastUpdatedAt = freshnessSource;
+      if (!(Number.isFinite(freshnessMs) && freshnessMs >= updatedCutoff)) staleFiles += 1;
+    } else {
+      staleFiles += 1;
+    }
+  }
+
+  const errorCount = ((errorRuns ?? []) as Array<Record<string, unknown>>).reduce((sum, row) => sum + Number(row.error_count ?? (row.status === 'error' ? 1 : 0) ?? 0), 0);
+  return {
+    totalFiles,
+    recentUploads,
+    updatedRecently,
+    staleFiles,
+    errorCount,
+    lastUpdatedAt,
+    lastCheckAt: lastRun?.created_at ? String(lastRun.created_at) : null,
+    lastCheckStatus: lastRun?.status ? (String(lastRun.status) as 'ok' | 'warning' | 'error') : null,
+    lastCheckMessage: lastRun?.message ? String(lastRun.message) : null,
+  } satisfies ScpCacheTracker;
+}
+
+export async function runScpCacheFreshnessCheck(trigger: 'login_auto' | 'manual_check' | 'upload', options?: { force?: boolean; message?: string | null; errorCount?: number }): Promise<ScpCacheTracker> {
+  const force = Boolean(options?.force);
+  if (trigger === 'login_auto' && !force) {
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+    const { data: existing, error } = await getSupabase()
+      .from('scp_cache_refresh_runs')
+      .select('id')
+      .eq('trigger', 'login_auto')
+      .gte('created_at', startOfDay.toISOString())
+      .limit(1)
+      .maybeSingle();
+    if (error) throw error;
+    if (existing) return calculateScpCacheTrackerSummary();
+  }
+
+  const summary = await calculateScpCacheTrackerSummary();
+  const status: 'ok' | 'warning' | 'error' = (options?.errorCount ?? 0) > 0
+    ? 'error'
+    : summary.staleFiles > 0
+      ? 'warning'
+      : 'ok';
+  const message = options?.message ?? (summary.staleFiles > 0
+    ? `${summary.staleFiles} CSV cache file${summary.staleFiles === 1 ? '' : 's'} look stale (older than 24 hours). Manual SCP download/upload is still required for refreshes.`
+    : summary.totalFiles > 0
+      ? 'All tracked CSV cache files look fresh within the last 24 hours.'
+      : 'No SCP CSV cache files have been uploaded yet.');
+
+  await createScpCacheRefreshRun({
+    trigger,
+    status,
+    totalFiles: summary.totalFiles,
+    recentUploads: summary.recentUploads,
+    updatedRecently: summary.updatedRecently,
+    staleFiles: summary.staleFiles,
+    errorCount: options?.errorCount ?? 0,
+    lastUpdatedAt: summary.lastUpdatedAt,
+    message,
+  });
+
+  return {
+    ...summary,
+    lastCheckAt: new Date().toISOString(),
+    lastCheckStatus: status,
+    lastCheckMessage: message,
+    errorCount: summary.errorCount + (options?.errorCount ?? 0),
+  };
 }
 
 export async function findScpCacheMatches(hints: string[], limit = 3): Promise<ScpCacheEntry[]> {
@@ -728,7 +931,7 @@ export async function findScpCacheMatches(hints: string[], limit = 3): Promise<S
 
   const { data, error } = await getSupabase()
     .from('scp_set_cache_index')
-    .select('id,cache_key,console_name,source_console_url,storage_path,downloaded_at,updated_at')
+    .select('id,cache_key,console_name,source_console_url,storage_path,downloaded_at,created_at,updated_at')
     .order('updated_at', { ascending: false })
     .limit(200);
   if (error) throw error;
@@ -764,6 +967,7 @@ export async function upsertScpCacheCsv(consoleName: string, csvText: string, so
 }
 
 export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
+  await runScpCacheFreshnessCheck('login_auto');
   const activeScan = await getActiveScan();
   const latestScan = activeScan ?? (await getLatestScan());
   const scanId = latestScan?.id;
@@ -776,7 +980,7 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
     topRejectionReasons: [],
     stageTimings: [],
   };
-  const scpCaches = await listScpCaches();
+  const [scpCaches, scpCacheTracker] = await Promise.all([listScpCaches(), calculateScpCacheTrackerSummary()]);
 
   if (scanId && latestScan) {
     const [
@@ -795,7 +999,10 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
 
     const mapped = ((resultRows ?? []) as Array<Record<string, unknown>>).map(mapResult);
     visibleResults = mapped.filter((row) => !row.needsReview);
-    needsReviewResults = mapped.filter((row) => row.needsReview);
+    needsReviewResults = mapped
+      .filter((row) => row.needsReview && (row.estimatedProfit ?? Number.NEGATIVE_INFINITY) > 0)
+      .sort((a, b) => (b.estimatedProfit ?? Number.NEGATIVE_INFINITY) - (a.estimatedProfit ?? Number.NEGATIVE_INFINITY) || (b.aiConfidence ?? 0) - (a.aiConfidence ?? 0) || b.createdAt.localeCompare(a.createdAt))
+      .slice(0, 20);
 
     const mappedEvents = ((eventRows ?? []) as Array<Record<string, unknown>>).map((row) => ({
       id: String(row.id),
@@ -838,6 +1045,7 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
     diagnostics,
     diagnosticsSummary,
     scpCaches,
+    scpCacheTracker,
     usage,
   };
 }
@@ -953,6 +1161,7 @@ function mapScpCacheEntry(row: Record<string, unknown>): ScpCacheEntry {
     storagePath: row.storage_path ? String(row.storage_path) : null,
     downloadedAt: row.downloaded_at ? String(row.downloaded_at) : null,
     updatedAt: row.updated_at ? String(row.updated_at) : null,
+    createdAt: row.created_at ? String(row.created_at) : null,
   };
 }
 

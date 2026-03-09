@@ -4,7 +4,7 @@ import { setDisposition } from '@/lib/db';
 
 const schema = z.object({
   ids: z.array(z.string().uuid()).min(1),
-  disposition: z.enum(['purchased', 'suppress_90_days', 'bad_logic']),
+  disposition: z.enum(['purchased', 'suppress_90_days', 'bad_logic', 'not_profitable']),
 });
 
 export async function POST(request: Request) {

@@ -2,12 +2,17 @@
 
 import { useState, type ChangeEvent, type FormEvent } from 'react';
 
-export function ScpCacheUploader() {
+type Props = {
+  onUploaded?: () => Promise<void> | void;
+};
+
+export function ScpCacheUploader({ onUploaded }: Props) {
   const [consoleName, setConsoleName] = useState('');
   const [sourceUrl, setSourceUrl] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [inputKey, setInputKey] = useState(0);
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -31,7 +36,11 @@ export function ScpCacheUploader() {
       const body = (await response.json()) as { error?: string; message?: string };
       if (!response.ok) throw new Error(body.error ?? 'Unable to upload CSV cache');
       setStatus(body.message ?? 'CSV cache uploaded.');
+      setConsoleName('');
+      setSourceUrl('');
       setFile(null);
+      setInputKey((value) => value + 1);
+      await onUploaded?.();
     } catch (error) {
       setStatus(error instanceof Error ? error.message : 'Unable to upload CSV cache');
     } finally {
@@ -43,7 +52,7 @@ export function ScpCacheUploader() {
     <form className="card card-pad stack" onSubmit={handleSubmit}>
       <div className="spread">
         <div>
-          <h2 className="section-title">SCP Set Cache</h2>
+          <h2 className="section-title">Upload SCP CSV</h2>
           <div className="muted small">Upload a SportsCardsPro CSV for a specific set so scans can use cached pricing and candidate rows.</div>
         </div>
         <button className="btn" type="submit" disabled={busy}>{busy ? 'Uploading...' : 'Upload CSV'}</button>
@@ -60,7 +69,13 @@ export function ScpCacheUploader() {
         </div>
         <div>
           <label className="label">CSV File</label>
-          <input className="input" type="file" accept=".csv,text/csv" onChange={(event: ChangeEvent<HTMLInputElement>) => setFile(event.target.files?.[0] ?? null)} />
+          <input
+            key={inputKey}
+            className="input"
+            type="file"
+            accept=".csv,text/csv"
+            onChange={(event: ChangeEvent<HTMLInputElement>) => setFile(event.target.files?.[0] ?? null)}
+          />
         </div>
       </div>
 

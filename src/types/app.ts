@@ -11,7 +11,7 @@ export type ScanStatus =
   | 'cancelled'
   | 'failed';
 
-export type Disposition = 'purchased' | 'suppress_90_days' | 'bad_logic';
+export type Disposition = 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
 export type ProviderName = 'ebay' | 'scp' | 'openai' | 'ximilar';
 
 export type SearchForm = {
@@ -113,6 +113,19 @@ export type ScpCacheEntry = {
   storagePath: string | null;
   downloadedAt: string | null;
   updatedAt: string | null;
+  createdAt: string | null;
+};
+
+export type ScpCacheTracker = {
+  totalFiles: number;
+  recentUploads: number;
+  updatedRecently: number;
+  staleFiles: number;
+  errorCount: number;
+  lastUpdatedAt: string | null;
+  lastCheckAt: string | null;
+  lastCheckStatus: 'ok' | 'warning' | 'error' | null;
+  lastCheckMessage: string | null;
 };
 
 export type ProviderLimitStatus = {
@@ -143,6 +156,7 @@ export type DashboardSnapshot = {
     stageTimings: Array<{ stage: string; seconds: number; eventCount: number }>;
   };
   scpCaches: ScpCacheEntry[];
+  scpCacheTracker: ScpCacheTracker;
   usage: {
     openAiCostTodayUsd: number | null;
     ebayCallsToday: number;
