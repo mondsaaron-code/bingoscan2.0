@@ -802,6 +802,68 @@ export async function listScpCaches(limit = 2, recentWindowDays = 14): Promise<S
     .slice(0, limit);
 }
 
+type ScpCacheStorageObject = {
+  path: string;
+  createdAt: string | null;
+  updatedAt: string | null;
+};
+
+async function listAllScpCacheStorageObjects(): Promise<ScpCacheStorageObject[]> {
+  const bucket = getSupabase().storage.from('scp-csv-cache');
+  const prefixes = ['', 'sets'];
+  const pageSize = 100;
+  const byPath = new Map<string, ScpCacheStorageObject>();
+
+  for (const prefix of prefixes) {
+    let offset = 0;
+    while (true) {
+      const { data, error } = await bucket.list(prefix, {
+        limit: pageSize,
+        offset,
+        sortBy: { column: 'updated_at', order: 'desc' },
+      });
+      if (error) throw error;
+
+      const rows = (data ?? []) as unknown as Array<Record<string, unknown>>;
+      for (const row of rows) {
+        const name = row.name ? String(row.name).trim() : '';
+        if (!name || !name.toLowerCase().endsWith('.csv')) continue;
+        const path = prefix ? `${prefix}/${name}` : name;
+        byPath.set(path, {
+          path,
+          createdAt: row.created_at ? String(row.created_at) : null,
+          updatedAt: row.updated_at ? String(row.updated_at) : null,
+        });
+      }
+
+      if (rows.length < pageSize) break;
+      offset += pageSize;
+    }
+  }
+
+  return [...byPath.values()];
+}
+
+function toTimeMs(value: string | null | undefined): number | null {
+  if (!value) return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function chooseLatestTimestamp(...values: Array<string | null | undefined>): string | null {
+  let best: string | null = null;
+  let bestMs = Number.NEGATIVE_INFINITY;
+  for (const value of values) {
+    const ms = toTimeMs(value);
+    if (ms === null) continue;
+    if (ms > bestMs) {
+      bestMs = ms;
+      best = value ?? null;
+    }
+  }
+  return best;
+}
+
 async function createScpCacheRefreshRun(payload: {
   trigger: 'login_auto' | 'manual_check' | 'upload';
   status: 'ok' | 'warning' | 'error';
@@ -829,37 +891,64 @@ async function createScpCacheRefreshRun(payload: {
 
 async function calculateScpCacheTrackerSummary(): Promise<ScpCacheTracker> {
   const supabase = getSupabase();
-  const [{ data: caches, error: cacheError }, { data: lastRun, error: runError }, { data: errorRuns, error: errorRunsError }] = await Promise.all([
-    supabase.from('scp_set_cache_index').select('id, created_at, downloaded_at, updated_at').order('updated_at', { ascending: false }).limit(500),
+  const [{ data: caches, error: cacheError }, { data: lastRun, error: runError }, { data: errorRuns, error: errorRunsError }, storageObjects] = await Promise.all([
+    supabase.from('scp_set_cache_index').select('id, cache_key, storage_path, created_at, downloaded_at, updated_at').order('updated_at', { ascending: false }).limit(1000),
     supabase.from('scp_cache_refresh_runs').select('status, message, created_at').order('created_at', { ascending: false }).limit(1).maybeSingle(),
     supabase.from('scp_cache_refresh_runs').select('error_count, status').gte('created_at', new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString()),
+    listAllScpCacheStorageObjects(),
   ]);
   if (cacheError) throw cacheError;
   if (runError) throw runError;
   if (errorRunsError) throw errorRunsError;
 
+  const cacheRows = (caches ?? []) as Array<Record<string, unknown>>;
+  const indexByPath = new Map<string, Record<string, unknown>>();
+  for (const row of cacheRows) {
+    const cacheKey = row.cache_key ? String(row.cache_key) : '';
+    const storagePath = row.storage_path ? String(row.storage_path) : cacheKey ? `sets/${cacheKey}` : '';
+    if (storagePath) indexByPath.set(storagePath, row);
+  }
+
+  const trackerRows = storageObjects.length > 0
+    ? storageObjects.map((objectRow) => {
+        const indexRow = indexByPath.get(objectRow.path);
+        return {
+          createdAt: chooseLatestTimestamp(objectRow.createdAt, indexRow?.created_at ? String(indexRow.created_at) : null),
+          freshnessSource: chooseLatestTimestamp(
+            objectRow.updatedAt,
+            indexRow?.updated_at ? String(indexRow.updated_at) : null,
+            indexRow?.downloaded_at ? String(indexRow.downloaded_at) : null,
+            objectRow.createdAt,
+          ),
+        };
+      })
+    : cacheRows.map((row) => ({
+        createdAt: row.created_at ? String(row.created_at) : null,
+        freshnessSource: chooseLatestTimestamp(
+          row.updated_at ? String(row.updated_at) : null,
+          row.downloaded_at ? String(row.downloaded_at) : null,
+          row.created_at ? String(row.created_at) : null,
+        ),
+      }));
+
   const now = Date.now();
   const recentUploadCutoff = now - 14 * 24 * 60 * 60 * 1000;
   const updatedCutoff = now - 24 * 60 * 60 * 1000;
-  let totalFiles = 0;
+  const totalFiles = trackerRows.length;
   let recentUploads = 0;
   let updatedRecently = 0;
   let staleFiles = 0;
   let lastUpdatedAt: string | null = null;
 
-  for (const row of (caches ?? []) as Array<Record<string, unknown>>) {
-    totalFiles += 1;
-    const createdAt = row.created_at ? new Date(String(row.created_at)).getTime() : Number.NaN;
-    if (Number.isFinite(createdAt) && createdAt >= recentUploadCutoff) recentUploads += 1;
-    const freshnessSource = row.updated_at ? String(row.updated_at) : row.downloaded_at ? String(row.downloaded_at) : null;
-    if (freshnessSource) {
-      const freshnessMs = new Date(freshnessSource).getTime();
-      if (Number.isFinite(freshnessMs) && freshnessMs >= updatedCutoff) updatedRecently += 1;
-      if (!lastUpdatedAt || freshnessSource > lastUpdatedAt) lastUpdatedAt = freshnessSource;
-      if (!(Number.isFinite(freshnessMs) && freshnessMs >= updatedCutoff)) staleFiles += 1;
-    } else {
-      staleFiles += 1;
-    }
+  for (const row of trackerRows) {
+    const createdAtMs = toTimeMs(row.createdAt);
+    if (createdAtMs !== null && createdAtMs >= recentUploadCutoff) recentUploads += 1;
+
+    const freshnessMs = toTimeMs(row.freshnessSource);
+    if (freshnessMs !== null && freshnessMs >= updatedCutoff) updatedRecently += 1;
+    else staleFiles += 1;
+
+    lastUpdatedAt = chooseLatestTimestamp(lastUpdatedAt, row.freshnessSource);
   }
 
   const errorCount = ((errorRuns ?? []) as Array<Record<string, unknown>>).reduce(
