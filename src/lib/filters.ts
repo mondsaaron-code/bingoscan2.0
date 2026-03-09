@@ -31,6 +31,9 @@ const BLOCK_WORDS = [
 const GRADED_WORDS = ['psa', 'bgs', 'sgc', 'cgc', 'beckett', 'gem mint', 'slab', 'graded'];
 const MULTI_CARD_PATTERNS = [/\blot\b/i, /\bpair\b/i, /\bset of\b/i, /\bteam set\b/i, /\bbundle\b/i, /\b2 card\b/i, /\b3 card\b/i, /\b4 card\b/i, /\bx2\b/i];
 
+const RAW_CONDITION_PATTERNS = [/\bungraded\b/i, /\braw\b/i, /\bnot graded\b/i];
+const GRADED_CONDITION_PATTERNS = [/\bpsa\b/i, /\bbgs\b/i, /\bsgc\b/i, /\bcgc\b/i, /\bbeckett\b/i, /\bgem mint\b/i, /\bslab(?:bed)?\b/i, /\bgraded\b/i];
+
 type AspectRule = {
   filterValue: string | undefined;
   keys: string[];
@@ -94,23 +97,39 @@ function rejectFromText(text: string, filters: SearchForm): string | null {
     return 'Memorabilia lot rejected';
   }
 
-  const isGraded = GRADED_WORDS.some((word) => lower.includes(word));
-  const detailConditionReason = rejectFromCondition(isGraded ? 'graded' : 'raw', filters.conditionMode);
-  if (detailConditionReason) return detailConditionReason;
+  const explicitCondition = detectConditionMode(text);
+  if (explicitCondition) {
+    const detailConditionReason = rejectFromCondition(explicitCondition, filters.conditionMode);
+    if (detailConditionReason) return detailConditionReason;
+  }
+
+  return null;
+}
+
+function detectConditionMode(value: string | null | undefined): CardConditionMode | null {
+  if (!value) return null;
+  const normalized = value.toLowerCase();
+
+  if (RAW_CONDITION_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return 'raw';
+  }
+
+  if (GRADED_CONDITION_PATTERNS.some((pattern) => pattern.test(normalized))) {
+    return 'graded';
+  }
 
   return null;
 }
 
 function rejectFromCondition(condition: string | null | undefined, conditionMode: CardConditionMode): string | null {
-  if (!condition) return null;
-  const normalized = condition.toLowerCase();
-  const isGraded = GRADED_WORDS.some((word) => normalized.includes(word));
+  const detected = detectConditionMode(condition);
+  if (!detected) return null;
 
-  if (conditionMode === 'raw' && isGraded) {
+  if (conditionMode === 'raw' && detected === 'graded') {
     return 'Rejected graded listing while search is raw';
   }
 
-  if (conditionMode === 'graded' && !isGraded) {
+  if (conditionMode === 'graded' && detected === 'raw') {
     return 'Rejected raw listing while search is graded';
   }
 
