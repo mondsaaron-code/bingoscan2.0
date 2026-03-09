@@ -783,22 +783,16 @@ export async function getScpCacheCsvTextByStoragePath(storagePath: string): Prom
   return await data.text();
 }
 
-export async function listScpCaches(limit = 2, recentWindowDays = 14): Promise<ScpCacheEntry[]> {
+export async function listScpCaches(limit = 10): Promise<ScpCacheEntry[]> {
   const { data, error } = await getSupabase()
     .from('scp_set_cache_index')
     .select('id,cache_key,console_name,source_console_url,storage_path,downloaded_at,created_at,updated_at')
     .order('updated_at', { ascending: false })
-    .limit(50);
+    .limit(Math.max(limit, 10));
   if (error) throw error;
 
-  const cutoff = Date.now() - recentWindowDays * 24 * 60 * 60 * 1000;
   return ((data ?? []) as Array<Record<string, unknown>>)
     .map(mapScpCacheEntry)
-    .filter((entry) => {
-      if (!entry.createdAt) return false;
-      const created = new Date(entry.createdAt).getTime();
-      return Number.isFinite(created) && created >= cutoff;
-    })
     .slice(0, limit);
 }
 
@@ -842,6 +836,15 @@ async function listAllScpCacheStorageObjects(): Promise<ScpCacheStorageObject[]>
   }
 
   return [...byPath.values()];
+}
+
+
+async function listAllScpCacheStorageObjectsSafe(): Promise<ScpCacheStorageObject[]> {
+  try {
+    return await listAllScpCacheStorageObjects();
+  } catch {
+    return [];
+  }
 }
 
 function toTimeMs(value: string | null | undefined): number | null {
@@ -895,41 +898,39 @@ async function calculateScpCacheTrackerSummary(): Promise<ScpCacheTracker> {
     supabase.from('scp_set_cache_index').select('id, cache_key, storage_path, created_at, downloaded_at, updated_at').order('updated_at', { ascending: false }).limit(1000),
     supabase.from('scp_cache_refresh_runs').select('status, message, created_at').order('created_at', { ascending: false }).limit(1).maybeSingle(),
     supabase.from('scp_cache_refresh_runs').select('error_count, status').gte('created_at', new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString()),
-    listAllScpCacheStorageObjects(),
+    listAllScpCacheStorageObjectsSafe(),
   ]);
   if (cacheError) throw cacheError;
   if (runError) throw runError;
   if (errorRunsError) throw errorRunsError;
 
   const cacheRows = (caches ?? []) as Array<Record<string, unknown>>;
-  const indexByPath = new Map<string, Record<string, unknown>>();
+  const trackerRowsByPath = new Map<string, { createdAt: string | null; freshnessSource: string | null }>();
+
   for (const row of cacheRows) {
     const cacheKey = row.cache_key ? String(row.cache_key) : '';
     const storagePath = row.storage_path ? String(row.storage_path) : cacheKey ? `sets/${cacheKey}` : '';
-    if (storagePath) indexByPath.set(storagePath, row);
+    const rowKey = storagePath || cacheKey || String(row.id ?? '');
+    if (!rowKey) continue;
+    trackerRowsByPath.set(rowKey, {
+      createdAt: row.created_at ? String(row.created_at) : null,
+      freshnessSource: chooseLatestTimestamp(
+        row.updated_at ? String(row.updated_at) : null,
+        row.downloaded_at ? String(row.downloaded_at) : null,
+        row.created_at ? String(row.created_at) : null,
+      ),
+    });
   }
 
-  const trackerRows = storageObjects.length > 0
-    ? storageObjects.map((objectRow) => {
-        const indexRow = indexByPath.get(objectRow.path);
-        return {
-          createdAt: chooseLatestTimestamp(objectRow.createdAt, indexRow?.created_at ? String(indexRow.created_at) : null),
-          freshnessSource: chooseLatestTimestamp(
-            objectRow.updatedAt,
-            indexRow?.updated_at ? String(indexRow.updated_at) : null,
-            indexRow?.downloaded_at ? String(indexRow.downloaded_at) : null,
-            objectRow.createdAt,
-          ),
-        };
-      })
-    : cacheRows.map((row) => ({
-        createdAt: row.created_at ? String(row.created_at) : null,
-        freshnessSource: chooseLatestTimestamp(
-          row.updated_at ? String(row.updated_at) : null,
-          row.downloaded_at ? String(row.downloaded_at) : null,
-          row.created_at ? String(row.created_at) : null,
-        ),
-      }));
+  for (const objectRow of storageObjects) {
+    const existing = trackerRowsByPath.get(objectRow.path);
+    trackerRowsByPath.set(objectRow.path, {
+      createdAt: chooseLatestTimestamp(existing?.createdAt, objectRow.createdAt),
+      freshnessSource: chooseLatestTimestamp(existing?.freshnessSource, objectRow.updatedAt, objectRow.createdAt),
+    });
+  }
+
+  const trackerRows = [...trackerRowsByPath.values()];
 
   const now = Date.now();
   const recentUploadCutoff = now - 14 * 24 * 60 * 60 * 1000;
@@ -1059,7 +1060,31 @@ export async function upsertScpCacheCsv(consoleName: string, csvText: string, so
 }
 
 export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
-  await runScpCacheFreshnessCheck('login_auto');
+  let scpCaches: ScpCacheEntry[] = [];
+  let scpCacheTracker: ScpCacheTracker = {
+    totalFiles: 0,
+    recentUploads: 0,
+    updatedRecently: 0,
+    staleFiles: 0,
+    errorCount: 0,
+    lastUpdatedAt: null,
+    lastCheckAt: null,
+    lastCheckStatus: null,
+    lastCheckMessage: null,
+  };
+
+  try {
+    await runScpCacheFreshnessCheck('login_auto');
+  } catch {
+    // Cache freshness issues should not block the live dashboard or worker loop.
+  }
+
+  try {
+    [scpCaches, scpCacheTracker] = await Promise.all([listScpCaches(), calculateScpCacheTrackerSummary()]);
+  } catch {
+    // Fall back to an empty cache snapshot so scans can still run.
+  }
+
   const activeScan = await getActiveScan();
   const latestScan = activeScan ?? (await getLatestScan());
   const scanId = latestScan?.id;
@@ -1072,7 +1097,6 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
     topRejectionReasons: [],
     stageTimings: [],
   };
-  const [scpCaches, scpCacheTracker] = await Promise.all([listScpCaches(), calculateScpCacheTrackerSummary()]);
 
   if (scanId && latestScan) {
     const [

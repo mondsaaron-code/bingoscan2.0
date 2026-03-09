@@ -108,9 +108,23 @@ export default function DealsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(filters),
       });
-      const body = (await response.json()) as { error?: string };
-      if (!response.ok) throw new Error(body.error ?? 'Unable to start scan');
+      const body = (await response.json()) as DashboardSnapshot['activeScan'] & { error?: string };
+      if (!response.ok || !body?.id) throw new Error(body?.error ?? 'Unable to start scan');
+      setDashboard((current) => ({
+        ...current,
+        activeScan: body,
+        latestScan: body,
+      }));
       setBanner('Scan started. Results will stream in below.');
+      try {
+        await fetch('/api/scan/worker', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ scanId: body.id }),
+        });
+      } catch {
+        // The polling loop will retry on the next tick.
+      }
       await loadDashboard();
     } catch (error) {
       setBanner(error instanceof Error ? error.message : 'Unable to start scan');

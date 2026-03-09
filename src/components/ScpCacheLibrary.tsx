@@ -5,13 +5,13 @@ export function ScpCacheLibrary({ caches }: { caches: ScpCacheEntry[] }) {
     <div className="card card-pad stack">
       <div className="spread">
         <div>
-          <div className="section-title">Recent SCP Uploads</div>
-          <div className="muted small">Showing the last two CSV files manually uploaded in the past two weeks.</div>
+          <div className="section-title">Indexed SCP CSV Files</div>
+          <div className="muted small">Showing the latest indexed SCP CSV files tracked by the app.</div>
         </div>
         <div className="badge">{caches.length} shown</div>
       </div>
       {caches.length === 0 ? (
-        <div className="muted small">No recent SCP CSV uploads in the past two weeks.</div>
+        <div className="muted small">No indexed SCP CSV files were found.</div>
       ) : (
         <div className="stack" style={{ gap: 10 }}>
           {caches.map((cache) => (
