@@ -30,7 +30,7 @@ import {
 } from '@/lib/db';
 import { shouldRejectListingDetails, shouldRejectTitle } from '@/lib/filters';
 import { buildListingFingerprint, buildScpCandidateFingerprint, compareFingerprintMatch } from '@/lib/card-fingerprint';
-import { triageNeedsReviewWithOpenAI, verifyCardMatchWithOpenAI } from '@/lib/openai';
+import { verifyCardMatchWithOpenAI } from '@/lib/openai';
 import {
   getSportsCardsProProduct,
   hydrateSportsCardsProCandidates,
@@ -99,6 +99,13 @@ let auctionOutcomeMemoryCache: { loadedAt: number; memory: ReturnType<typeof bui
 let priceBandOutcomeMemoryCache: { loadedAt: number; memory: ReturnType<typeof buildPriceBandOutcomeMemory> } | null = null;
 let cardNumberOutcomeMemoryCache: { loadedAt: number; memory: ReturnType<typeof buildCardNumberOutcomeMemory> } | null = null;
 const sellerOutcomeCache = new Map<string, { loadedAt: number; value: Awaited<ReturnType<typeof getSellerOutcomeMemory>> }>();
+
+type RankedCandidateRow = {
+  candidate: ScpCandidate;
+  score: number;
+  reviewMemory: ReturnType<typeof scoreScpCandidateAgainstReviewMemory>;
+  cardNumberMemory: ReturnType<typeof scoreScpCandidateAgainstCardNumberMemory>;
+};
 
 export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   const scan = await getScanById(scanId);
@@ -639,14 +646,29 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     await appendMetrics(scanId, { openaiCalls: 1 });
   }
 
+  const listingFingerprint = buildListingFingerprint(listing, {
+    details: details ?? null,
+    ximilarHints: ximilarHints?.titleHints ?? [],
+  });
   const chosen = rankedCandidates.find((candidate) => candidate.productId === decision.chosenProductId) ?? rankedCandidates[0] ?? null;
+  const chosenRankingRow = chosen ? (rankedCandidateRows.find((row) => row.candidate.productId === chosen.productId) ?? null) : null;
+  const chosenComparison = chosen ? compareFingerprintMatch(listingFingerprint, buildScpCandidateFingerprint(chosen)) : null;
   const chosenCardNumberSignal = chosen
     ? scoreScpCandidateAgainstCardNumberMemory({ ebayTitle: `${listing.title} ${details?.subtitle ?? ''}`.trim(), scpProductName: chosen.productName, requestedCardNumber: filters.cardNumber ?? null }, cardNumberOutcomeMemory)
     : null;
   const cardNumberThresholdAdjustment = (chosenCardNumberSignal?.score ?? 0) <= -8 ? 4 : (chosenCardNumberSignal?.score ?? 0) >= 8 ? -2 : 0;
   const autoAcceptThreshold = Math.max(88, Math.min(96, AUTO_ACCEPT_CONFIDENCE + cardNumberThresholdAdjustment));
+  const autoAcceptHeuristic = deriveAutoAcceptHeuristic({
+    decision,
+    comparison: chosenComparison,
+    reviewMemoryScore: chosenRankingRow?.reviewMemory.score ?? 0,
+    cardNumberMemoryScore: chosenCardNumberSignal?.score ?? 0,
+    listingQualityScore: listingQuality?.score ?? null,
+  });
+  const effectiveAutoAcceptThreshold = Math.max(80, autoAcceptThreshold - autoAcceptHeuristic.thresholdReduction);
+  const treatAsExactMatch = decision.exactMatch || autoAcceptHeuristic.treatAsExact;
 
-  if (!decision.exactMatch || decision.confidence < autoAcceptThreshold || !chosen) {
+  if (!treatAsExactMatch || decision.confidence < effectiveAutoAcceptThreshold || !chosen) {
     const diversityDecision = await assessScanResultDiversity(scanId, listing, rankedCandidates[0] ?? null);
     if (diversityDecision.rejectReason) {
       await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: diversityDecision.rejectReason });
@@ -677,7 +699,7 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
       .map((productId) => candidateFinancials.find((row) => row.candidate.productId === productId))
       .filter((row): row is NonNullable<typeof row> => Boolean(row));
 
-    let bestReviewCandidate = aiPreferredCandidates.find((row) => row.estimatedProfit !== null && row.estimatedProfit > 0 && passesThresholds(filters, row.estimatedProfit, row.estimatedMarginPct))
+    const bestReviewCandidate = aiPreferredCandidates.find((row) => row.estimatedProfit !== null && row.estimatedProfit > 0 && passesThresholds(filters, row.estimatedProfit, row.estimatedMarginPct))
       ?? profitableReviewCandidates
         .slice()
         .sort((a, b) => (b.estimatedProfit ?? Number.NEGATIVE_INFINITY) - (a.estimatedProfit ?? Number.NEGATIVE_INFINITY))[0];
@@ -687,86 +709,37 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
       return;
     }
 
-    let reviewCandidates = [
+    const reviewCandidates = [
       ...aiPreferredCandidates.map((row) => row.candidate),
       bestReviewCandidate.candidate,
       ...rankedCandidates,
     ].filter((candidate, index, arr) => arr.findIndex((row) => row.productId === candidate.productId) === index).slice(0, 3);
 
-    const reviewCandidateMeta = reviewCandidates.map((candidate) => {
-      const financial = candidateFinancials.find((row) => row.candidate.productId === candidate.productId);
-      const rankedRow = rankedCandidateRows.find((row) => row.candidate.productId === candidate.productId);
-      return {
-        productId: candidate.productId,
-        estimatedProfit: financial?.estimatedProfit ?? null,
-        estimatedMarginPct: financial?.estimatedMarginPct ?? null,
-        reviewMemoryScore: rankedRow?.reviewMemory.score ?? 0,
-        cardNumberMemoryScore: rankedRow?.cardNumberMemory.score ?? 0,
-        aiPreferred: decision.topThreeProductIds.includes(candidate.productId),
-      };
-    });
-
-    const triageOutcome = await withProviderRetries('openai', 'needs review triage', () => triageNeedsReviewWithOpenAI(listing, reviewCandidates, {
-      ximilarHints: ximilarHints?.titleHints ?? [],
+    const reviewCandidateRows = reviewCandidates
+      .map((candidate) => rankedCandidateRows.find((row) => row.candidate.productId === candidate.productId))
+      .filter((row): row is RankedCandidateRow => Boolean(row));
+    const weakReviewRejection = decideWeakReviewRejection({
+      listing,
       details,
-      candidateMeta: reviewCandidateMeta,
-    }), {
-      scanId,
-      stage: 'ai_verifying',
-      attempts: 1,
+      ximilarHints: ximilarHints?.titleHints ?? [],
+      decision,
+      reviewCandidates: reviewCandidateRows,
     });
-
-    if (triageOutcome.ok) {
-      await incrementUsage('openai', 1);
-      await appendMetrics(scanId, { openaiCalls: 1 });
-      if (!triageOutcome.value.sendToReview) {
-        const rejectReason = triageOutcome.value.rejectReason
-          ?? 'OpenAI review triage rejected the listing because none of the SCP options looked credible enough to review.';
-        await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: rejectReason });
-        await appendMetrics(scanId, { candidatesFilteredOut: 1 });
-        await addScanEvent(scanId, 'info', 'ai_verifying', 'Rejected listing before Needs Review', `${listing.title}
-${rejectReason}
-${triageOutcome.value.reasoning}`);
-        return;
-      }
-
-      const triageTop = triageOutcome.value.topThreeProductIds
-        .map((productId) => reviewCandidates.find((candidate) => candidate.productId === productId))
-        .filter((candidate): candidate is ScpCandidate => Boolean(candidate));
-      const triagePreferred = triageOutcome.value.preferredProductId
-        ? reviewCandidates.find((candidate) => candidate.productId === triageOutcome.value.preferredProductId) ?? null
-        : null;
-      reviewCandidates = [
-        ...(triagePreferred ? [triagePreferred] : []),
-        ...triageTop,
-        ...reviewCandidates,
-      ].filter((candidate, index, arr) => arr.findIndex((row) => row.productId === candidate.productId) === index).slice(0, 3);
-
-      if (triagePreferred) {
-        const preferredFinancial = candidateFinancials.find((row) => row.candidate.productId === triagePreferred.productId);
-        if (preferredFinancial && preferredFinancial.estimatedProfit !== null && preferredFinancial.estimatedProfit > 0 && passesThresholds(filters, preferredFinancial.estimatedProfit, preferredFinancial.estimatedMarginPct)) {
-          bestReviewCandidate = preferredFinancial;
-        }
-      }
+    if (weakReviewRejection) {
+      await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: weakReviewRejection });
+      await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+      await addScanEvent(scanId, 'info', 'ai_verifying', weakReviewRejection, listing.title);
+      return;
     }
 
-    const reviewReasonBase = buildNeedsReviewReason({
+    const reviewReason = buildNeedsReviewReason({
       decision,
-      autoAcceptThreshold,
+      autoAcceptThreshold: effectiveAutoAcceptThreshold,
       listing,
       details,
       chosen: bestReviewCandidate.candidate,
       rankedCandidates: reviewCandidates,
     });
-    const reviewReason = triageOutcome.ok
-      ? `${reviewReasonBase} • Final review triage: ${triageOutcome.value.reasoning}`
-      : reviewReasonBase;
-
-    const reviewShortlistIds = new Set<string>([
-      ...decision.topThreeProductIds,
-      ...(triageOutcome.ok ? triageOutcome.value.topThreeProductIds : []),
-      ...(triageOutcome.ok && triageOutcome.value.preferredProductId ? [triageOutcome.value.preferredProductId] : []),
-    ]);
 
     const resultId = await insertResultPayload(
       scanId,
@@ -788,14 +761,13 @@ ${triageOutcome.value.reasoning}`);
     );
     await insertReviewOptions(
       resultId,
-      reviewCandidates.map((candidate, index) => reviewOptionPayload(listing, details, candidate, index + 1, triageOutcome.ok ? triageOutcome.value.confidence : decision.confidence, reviewShortlistIds.has(candidate.productId))),
+      reviewCandidates.map((candidate, index) => reviewOptionPayload(listing, details, candidate, index + 1, decision.confidence, decision.topThreeProductIds.includes(candidate.productId))),
     );
     await appendMetrics(scanId, { needsReview: 1 });
-    await updateCandidate(candidateId, { stage: 'needs_review', ai_confidence: triageOutcome.ok ? triageOutcome.value.confidence : decision.confidence, ai_reasoning: triageOutcome.ok ? `${decision.reasoning} • ${triageOutcome.value.reasoning}` : decision.reasoning });
+    await updateCandidate(candidateId, { stage: 'needs_review', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning });
     await addScanEvent(scanId, 'warning', 'ai_verifying', 'Sent listing to Needs Review', `${listing.title}
 ${reviewReason}
-${decision.reasoning}${triageOutcome.ok ? `
-${triageOutcome.value.reasoning}` : ''}`);
+${decision.reasoning}`);
     return;
   }
 
@@ -838,6 +810,9 @@ ${triageOutcome.value.reasoning}` : ''}`);
   );
   await appendMetrics(scanId, { dealsFound: 1 });
   await updateCandidate(candidateId, { stage: 'accepted', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning, scp_product_id: chosen.productId });
+  if (autoAcceptHeuristic.reason && (!decision.exactMatch || effectiveAutoAcceptThreshold !== autoAcceptThreshold)) {
+    await addScanEvent(scanId, 'info', 'ai_verifying', 'Applied smart auto-accept override', `${listing.title}\n${autoAcceptHeuristic.reason}\nConfidence ${decision.confidence} vs threshold ${effectiveAutoAcceptThreshold}`);
+  }
   await addScanEvent(scanId, 'info', 'publishing_results', 'Added deal result', `${listing.title}\nConfidence ${decision.confidence}`);
 }
 
@@ -927,6 +902,105 @@ async function insertResultPayload(
     reasoning: composedReasoning,
     review_reason: reviewReason ?? null,
   });
+}
+
+function countHardFingerprintMismatches(negativeSignals: string[]): number {
+  return negativeSignals.filter((signal) => /Year mismatch|Card # mismatch|Parallel mismatch|Serial-numbering mismatch|Autograph mismatch|Memorabilia mismatch/i.test(signal)).length;
+}
+
+function deriveAutoAcceptHeuristic(args: {
+  decision: Awaited<ReturnType<typeof verifyCardMatchWithOpenAI>>;
+  comparison: ReturnType<typeof compareFingerprintMatch> | null;
+  reviewMemoryScore: number;
+  cardNumberMemoryScore: number;
+  listingQualityScore?: number | null;
+}): { treatAsExact: boolean; thresholdReduction: number; reason: string | null } {
+  const comparison = args.comparison;
+  if (!comparison) return { treatAsExact: false, thresholdReduction: 0, reason: null };
+
+  const hardMismatches = countHardFingerprintMismatches(comparison.negativeSignals);
+  const strongPositiveSignals = comparison.positiveSignals.length;
+  const listingQualityScore = args.listingQualityScore ?? 0;
+
+  if (comparison.score >= 46 && hardMismatches === 0 && args.decision.confidence >= 72 && strongPositiveSignals >= 3) {
+    return {
+      treatAsExact: true,
+      thresholdReduction: 12,
+      reason: 'Strong fingerprint alignment let the listing skip manual review.',
+    };
+  }
+
+  if (
+    comparison.score >= 38
+    && hardMismatches === 0
+    && args.decision.confidence >= 78
+    && (args.reviewMemoryScore >= 5 || args.cardNumberMemoryScore >= 5 || listingQualityScore >= 70)
+  ) {
+    return {
+      treatAsExact: true,
+      thresholdReduction: 8,
+      reason: 'Strong fingerprint alignment plus learned history supported auto-accept.',
+    };
+  }
+
+  if (args.decision.exactMatch && comparison.score >= 30 && hardMismatches <= 1 && args.decision.confidence >= 84) {
+    return {
+      treatAsExact: true,
+      thresholdReduction: 4,
+      reason: 'OpenAI exact-match call was backed by a solid fingerprint comparison.',
+    };
+  }
+
+  return { treatAsExact: false, thresholdReduction: 0, reason: null };
+}
+
+function decideWeakReviewRejection(args: {
+  listing: EbayListing;
+  details: EbayListingDetails | null;
+  ximilarHints: string[];
+  decision: Awaited<ReturnType<typeof verifyCardMatchWithOpenAI>>;
+  reviewCandidates: RankedCandidateRow[];
+}): string | null {
+  if (args.reviewCandidates.length === 0) return 'No review candidates remained after ranking.';
+
+  const listingFingerprint = buildListingFingerprint(args.listing, {
+    details: args.details ?? null,
+    ximilarHints: args.ximilarHints,
+  });
+
+  const candidateSignals = args.reviewCandidates.map((row) => {
+    const comparison = compareFingerprintMatch(listingFingerprint, buildScpCandidateFingerprint(row.candidate));
+    return {
+      row,
+      comparison,
+      hardMismatches: countHardFingerprintMismatches(comparison.negativeSignals),
+    };
+  });
+
+  const best = candidateSignals[0];
+  const allWeak = candidateSignals.every((entry) => (
+    entry.comparison.score < 22
+    && (entry.hardMismatches > 0 || entry.comparison.positiveSignals.length < 3)
+    && entry.row.reviewMemory.score < 5
+    && entry.row.cardNumberMemory.score < 5
+  ));
+  if (allWeak) {
+    return 'Skipped Needs Review because the top SCP options all looked like weak mismatches.';
+  }
+
+  if (args.decision.confidence < 58 && best.comparison.score < 18 && best.row.reviewMemory.score < 5 && best.row.cardNumberMemory.score < 5) {
+    return 'Skipped Needs Review because the best SCP option still looked too weak after AI matching.';
+  }
+
+  if (best.hardMismatches >= 2 && best.comparison.score < 26 && args.decision.confidence < 74) {
+    return 'Skipped Needs Review because the best SCP option still carried multiple hard fingerprint mismatches.';
+  }
+
+  if (best.row.reviewMemory.score <= -8 && best.comparison.score < 28) {
+    return 'Skipped Needs Review because review history flags this SCP option family as weak.';
+  }
+
+  return null;
 }
 
 function buildNeedsReviewReason(args: {

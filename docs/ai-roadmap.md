@@ -30,6 +30,8 @@ Use more AI in a way that increases purchase-ready hits and decreases manual cor
 - Needs Review rows now store a structured review reason so you can see why the model stopped short of auto-accept.
 - Review options now carry positive and negative fingerprint signals for faster human selection.
 - Review resolutions now log top-1/top-3 hit data so future tuning can be measured instead of guessed.
+- A smart auto-accept override now promotes some high-signal fingerprint matches into Deals.
+- A weak-review rejection pass now blocks obvious SCP lookalikes from reaching Needs Review.
 
 ## Near-term target
 The next code changes should reduce the number of bad cards that reach Needs Review without suppressing real deals.

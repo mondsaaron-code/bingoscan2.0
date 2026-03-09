@@ -69,19 +69,28 @@ export function NeedsReviewBoard({
                         <a href={row.ebayUrl} target="_blank" rel="noreferrer" style={{ fontWeight: 700 }}>{row.ebayTitle}</a>
                       </div>
                       {row.sellerUsername ? <div className="small muted">Seller: {row.sellerUsername}{row.listingQualityScore !== null ? ` · Listing ${Math.round(row.listingQualityScore)}/100` : ''}</div> : null}
-                      <div className="grid grid-3" style={{ gap: 10 }}>
+                      <div className="grid grid-4" style={{ gap: 10 }}>
                         <div className="kpi">
-                          <div className="small muted">eBay Total</div>
+                          <div className="small muted">Item Price</div>
+                          <div className="kpi-value" style={{ fontSize: '1.05rem' }}>{toCurrency(row.purchasePrice)}</div>
+                        </div>
+                        <div className="kpi">
+                          <div className="small muted">Shipping</div>
+                          <div className="kpi-value" style={{ fontSize: '1.05rem' }}>{toCurrency(row.shippingPrice)}</div>
+                        </div>
+                        <div className="kpi">
+                          <div className="small muted">Purchase Total</div>
                           <div className="kpi-value" style={{ fontSize: '1.15rem' }}>{toCurrency(row.totalPurchasePrice)}</div>
                         </div>
                         <div className="kpi">
                           <div className="small muted">Estimated Profit</div>
                           <div className="kpi-value" style={{ fontSize: '1.15rem' }}>{toCurrency(row.estimatedProfit)}</div>
                         </div>
-                        <div className="kpi">
-                          <div className="small muted">Margin</div>
-                          <div className="kpi-value" style={{ fontSize: '1.15rem' }}>{toPct(row.estimatedMarginPct)}</div>
-                        </div>
+                      </div>
+                      <div className="small muted">eBay total used for profit math: {toCurrency(row.purchasePrice)} + {toCurrency(row.shippingPrice)} shipping = {toCurrency(row.totalPurchasePrice)}</div>
+                      <div className="kpi" style={{ maxWidth: 180 }}>
+                        <div className="small muted">Margin</div>
+                        <div className="kpi-value" style={{ fontSize: '1.15rem' }}>{toPct(row.estimatedMarginPct)}</div>
                       </div>
                       <div className="small" style={{ color: '#d8e1f0' }}>
                         Review focus: {summarizeDealReasons({
@@ -97,7 +106,6 @@ export function NeedsReviewBoard({
                         }) || 'Compare the SCP candidates below.'}
                       </div>
                       {row.reviewReason ? <div className="notice"><div className="small"><strong>Why this hit review:</strong> {row.reviewReason}</div></div> : null}
-                      <div className="small muted">eBay breakdown: {toCurrency(row.purchasePrice)} item + {toCurrency(row.shippingPrice)} ship = {toCurrency(row.totalPurchasePrice)}</div>
                       <div className="small muted">Current placeholder match: Ungraded {toCurrency(row.scpUngradedSell)} · Grade 9 {toCurrency(row.scpGrade9)} · PSA 10 {toCurrency(row.scpPsa10)}</div>
                       <div className="small muted">Grade lane: {gradingLane.label} — {gradingLane.detail}</div>
                       {row.reasoning ? <div className="notice"><div className="small"><strong>AI review note:</strong> {row.reasoning}</div></div> : null}

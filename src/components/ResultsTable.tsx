@@ -76,7 +76,7 @@ export function ResultsTable({
               <th>Image</th>
               <th>eBay Title</th>
               <th><button className="btn btn-ghost small" onClick={() => flipSort('dealScore', sortKey, sortDir, setSortKey, setSortDir)}>Deal Score</button></th>
-              <th><button className="btn btn-ghost small" onClick={() => flipSort('totalPurchasePrice', sortKey, sortDir, setSortKey, setSortDir)}>eBay Total</button></th>
+              <th><button className="btn btn-ghost small" onClick={() => flipSort('totalPurchasePrice', sortKey, sortDir, setSortKey, setSortDir)}>Purchase Total</button></th>
               <th><button className="btn btn-ghost small" onClick={() => flipSort('estimatedProfit', sortKey, sortDir, setSortKey, setSortDir)}>Profit</button></th>
               <th>SCP Ungraded</th>
               <th>Grade 9</th>
@@ -106,6 +106,7 @@ export function ResultsTable({
                   <td>
                     <div><a href={row.ebayUrl} target="_blank" rel="noreferrer">{row.ebayTitle}</a></div>
                     <div className="small muted">Confidence: {row.aiConfidence ? `${row.aiConfidence}%` : '—'}</div>
+                    <div className="small muted">eBay total: {toCurrency(row.purchasePrice)} + {toCurrency(row.shippingPrice)} shipping = {toCurrency(row.totalPurchasePrice)}</div>
                     {row.sellerUsername ? <div className="small muted">Seller: {row.sellerUsername}{row.listingQualityScore !== null ? ` · Listing ${Math.round(row.listingQualityScore)}/100` : ''}</div> : null}
                     <div className="small" style={{ color: '#d8e1f0', marginTop: 4 }}>
                       Why it stands out: {summarizeDealReasons({
@@ -142,7 +143,7 @@ export function ResultsTable({
                   <td><span className="badge">{dealScore}</span></td>
                   <td>
                     <div>{toCurrency(row.totalPurchasePrice)}</div>
-                    <div className="small muted">{toCurrency(row.purchasePrice)} item + {toCurrency(row.shippingPrice)} ship</div>
+                    <div className="small muted">{toCurrency(row.purchasePrice)} + {toCurrency(row.shippingPrice)} ship</div>
                   </td>
                   <td>{toCurrency(row.estimatedProfit)}</td>
                   <td>{toCurrency(row.scpUngradedSell)}</td>

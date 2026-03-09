@@ -33,6 +33,9 @@ The product goal is not just to generate results. The goal is to surface cards y
 - Review cards now store a human-readable reason for why they were sent to Needs Review.
 - Review options now show fingerprint match signals, candidate source, and AI shortlist status.
 - Manual review resolutions now log whether the winning SCP choice was AI top-1 or at least inside the AI top-3 shortlist.
+- Needs Review and Deals now show the eBay item price, shipping, and shipping-inclusive purchase total explicitly.
+- Strong fingerprint-aligned profitable matches can auto-promote into Deals even when OpenAI is slightly too conservative.
+- Weak lookalike SCP matches can now be rejected before they ever reach Needs Review.
 
 ## Current pain point
 The current bottleneck is too much manual review time. The system is still finding too many listings that need human correction before they are actionable.
@@ -86,9 +89,3 @@ Before major AI changes, compare them against a held-out set of historical revie
 3. Build evaluation tooling from historical review outcomes.
 4. Add better visibility into why a listing became Needs Review.
 5. Only after that, expand scan intelligence and automation.
-
-
-## Latest implemented next step
-- eBay purchase totals now explicitly show **item price + seller shipping = total** in the scan UI.
-- Search purchase filters are labeled as shipping-inclusive totals.
-- Needs Review now gets a second-pass OpenAI triage step before a card reaches the manual board. This extra AI pass can reject weak mismatch candidates before they consume review time, and it can reorder the top 3 options around the strongest match.
