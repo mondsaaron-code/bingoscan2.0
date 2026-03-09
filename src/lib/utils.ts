@@ -589,9 +589,16 @@ const TITLE_MEMORY_STOP_WORDS = new Set([
   'rookie', 'rc', 'auto', 'autograph', 'signed', 'patch', 'relic', 'jersey', 'raw', 'graded', 'psa', 'bgs', 'sgc', 'cgc',
 ]);
 
+function getNegativeDispositionWeight(disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable', weights: { purchased: number; suppress: number; badLogic: number; notProfitable?: number }): number {
+  if (disposition === 'purchased') return weights.purchased;
+  if (disposition === 'bad_logic') return weights.badLogic;
+  if (disposition === 'not_profitable') return weights.notProfitable ?? weights.suppress;
+  return weights.suppress;
+}
+
 export type TitleOutcomeMemoryRow = {
   ebayTitle: string;
-  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic';
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
 };
 
 export type TitleOutcomeMemory = {
@@ -602,7 +609,7 @@ export type TitleOutcomeMemory = {
 export type FamilyOutcomeMemoryRow = {
   ebayTitle: string;
   scpProductName?: string | null;
-  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic';
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
 };
 
 export type FamilyOutcomeMemory = {
@@ -630,7 +637,7 @@ export type AuctionOutcomeMemoryRow = {
   scpProductName?: string | null;
   auctionEndsAt?: string | null;
   totalPurchasePrice: number;
-  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic';
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
 };
 
 export type AuctionOutcomeMemory = {
@@ -644,7 +651,7 @@ export type PriceBandOutcomeMemoryRow = {
   totalPurchasePrice: number;
   estimatedProfit?: number | null;
   estimatedMarginPct?: number | null;
-  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic';
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
 };
 
 export type PriceBandOutcomeMemory = {
@@ -676,10 +683,10 @@ export function buildTitleOutcomeMemory(rows: TitleOutcomeMemoryRow[]): TitleOut
     const fingerprint = normalizeTitleFingerprint(row.ebayTitle);
     if (!fingerprint) continue;
 
-    const exactWeight = row.disposition === 'purchased' ? 7 : row.disposition === 'bad_logic' ? -10 : -4;
+    const exactWeight = getNegativeDispositionWeight(row.disposition, { purchased: 7, badLogic: -10, suppress: -4, notProfitable: -6 });
     exact.set(fingerprint, (exact.get(fingerprint) ?? 0) + exactWeight);
 
-    const tokenWeight = row.disposition === 'purchased' ? 1.6 : row.disposition === 'bad_logic' ? -2.4 : -0.8;
+    const tokenWeight = getNegativeDispositionWeight(row.disposition, { purchased: 1.6, badLogic: -2.4, suppress: -0.8, notProfitable: -1.2 });
     const tokens = new Set(
       tokenizeLoose(row.ebayTitle)
         .map((token) => token.replace(/[\[\]]/g, ''))
@@ -732,8 +739,8 @@ export function buildFamilyOutcomeMemory(rows: FamilyOutcomeMemoryRow[]): Family
     });
     if (!keys.exactFamily && !keys.cluster) continue;
 
-    const exactWeight = row.disposition === 'purchased' ? 5 : row.disposition === 'bad_logic' ? -8 : -3;
-    const clusterWeight = row.disposition === 'purchased' ? 2 : row.disposition === 'bad_logic' ? -3 : -1;
+    const exactWeight = getNegativeDispositionWeight(row.disposition, { purchased: 5, badLogic: -8, suppress: -3, notProfitable: -4 });
+    const clusterWeight = getNegativeDispositionWeight(row.disposition, { purchased: 2, badLogic: -3, suppress: -1, notProfitable: -2 });
 
     if (keys.exactFamily) exact.set(keys.exactFamily, (exact.get(keys.exactFamily) ?? 0) + exactWeight);
     if (keys.cluster) cluster.set(keys.cluster, (cluster.get(keys.cluster) ?? 0) + clusterWeight);
@@ -876,7 +883,7 @@ export function buildAuctionOutcomeMemory(rows: AuctionOutcomeMemoryRow[]): Auct
     const keys = buildDealDiversityKeys({ ebayTitle: row.ebayTitle, scpProductName: row.scpProductName ?? null });
     const familyKey = keys.cluster || keys.exactFamily || normalizeTitleFingerprint(row.ebayTitle);
     const band = getAuctionUrgencyBand(row.auctionEndsAt);
-    const baseWeight = row.disposition === 'purchased' ? 5 : row.disposition === 'bad_logic' ? -7 : -2;
+    const baseWeight = getNegativeDispositionWeight(row.disposition, { purchased: 5, badLogic: -7, suppress: -2, notProfitable: -3 });
     globalBand.set(band, (globalBand.get(band) ?? 0) + Math.max(-4, Math.min(4, baseWeight - (band === 'buy_now' ? 0 : 1))));
     if (!familyKey) continue;
     if (!familyBand.has(familyKey)) familyBand.set(familyKey, new Map());
@@ -1012,7 +1019,7 @@ const PLAYER_MEMORY_STOP_WORDS = new Set([
 export type PlayerOutcomeMemoryRow = {
   ebayTitle: string;
   scpProductName?: string | null;
-  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic';
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
 };
 
 export type PlayerOutcomeMemory = {
@@ -1052,7 +1059,7 @@ export function buildPlayerOutcomeMemory(rows: PlayerOutcomeMemoryRow[]): Player
   for (const row of rows) {
     const playerKey = inferPlayerKey({ ebayTitle: row.ebayTitle, scpProductName: row.scpProductName ?? null });
     if (!playerKey) continue;
-    const weight = row.disposition === 'purchased' ? 5 : row.disposition === 'bad_logic' ? -7 : -2;
+    const weight = getNegativeDispositionWeight(row.disposition, { purchased: 5, badLogic: -7, suppress: -2, notProfitable: -3 });
     player.set(playerKey, (player.get(playerKey) ?? 0) + weight);
   }
   return { player };
@@ -1075,7 +1082,7 @@ export function scoreListingAgainstPlayerMemory(
 export type CardNumberOutcomeMemoryRow = {
   ebayTitle: string;
   scpProductName?: string | null;
-  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic';
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
 };
 
 export type CardNumberOutcomeMemory = {
@@ -1120,7 +1127,7 @@ export function buildCardNumberOutcomeMemory(rows: CardNumberOutcomeMemoryRow[])
   const familyCategory = new Map<string, Map<string, number>>();
   for (const row of rows) {
     const evidence = getCardNumberEvidenceCategory({ ebayTitle: row.ebayTitle, scpProductName: row.scpProductName ?? null });
-    const weight = row.disposition === 'purchased' ? 4 : row.disposition === 'bad_logic' ? -6 : -2;
+    const weight = getNegativeDispositionWeight(row.disposition, { purchased: 4, badLogic: -6, suppress: -2, notProfitable: -3 });
     globalCategory.set(evidence.category, (globalCategory.get(evidence.category) ?? 0) + weight);
     if (!evidence.familyKey) continue;
     if (!familyCategory.has(evidence.familyKey)) familyCategory.set(evidence.familyKey, new Map());

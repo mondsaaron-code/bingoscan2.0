@@ -862,10 +862,7 @@ async function calculateScpCacheTrackerSummary(): Promise<ScpCacheTracker> {
     }
   }
 
-  const errorCount = ((errorRuns ?? []) as Array<Record<string, unknown>>).reduce(
-    (sum, row) => sum + Number(row.error_count ?? (row.status === 'error' ? 1 : 0)),
-    0,
-  );
+  const errorCount = ((errorRuns ?? []) as Array<Record<string, unknown>>).reduce((sum, row) => sum + Number(row.error_count ?? (row.status === 'error' ? 1 : 0) ?? 0), 0);
   return {
     totalFiles,
     recentUploads,
