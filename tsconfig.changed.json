@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "skipLibCheck": true
+  },
+  "include": [
+    "src/lib/openai.ts",
+    "src/lib/orchestrator.ts",
+    "src/components/SearchForm.tsx",
+    "src/components/ResultsTable.tsx",
+    "src/components/NeedsReviewBoard.tsx",
+    "src/lib/ebay.ts",
+    "src/lib/card-fingerprint.ts",
+    "src/lib/scp.ts",
+    "src/lib/utils.ts",
+    "src/lib/db.ts",
+    "src/types/app.ts"
+  ]
+}

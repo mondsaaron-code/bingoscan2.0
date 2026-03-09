@@ -86,3 +86,9 @@ Before major AI changes, compare them against a held-out set of historical revie
 3. Build evaluation tooling from historical review outcomes.
 4. Add better visibility into why a listing became Needs Review.
 5. Only after that, expand scan intelligence and automation.
+
+
+## Latest implemented next step
+- eBay purchase totals now explicitly show **item price + seller shipping = total** in the scan UI.
+- Search purchase filters are labeled as shipping-inclusive totals.
+- Needs Review now gets a second-pass OpenAI triage step before a card reaches the manual board. This extra AI pass can reject weak mismatch candidates before they consume review time, and it can reorder the top 3 options around the strongest match.

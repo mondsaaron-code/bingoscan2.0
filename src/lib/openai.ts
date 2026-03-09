@@ -18,6 +18,15 @@ export type MatchDecision = {
   extractedAttributes: Record<string, string | null>;
 };
 
+export type NeedsReviewTriageDecision = {
+  sendToReview: boolean;
+  confidence: number;
+  reasoning: string;
+  rejectReason: string | null;
+  preferredProductId: string | null;
+  topThreeProductIds: string[];
+};
+
 export async function verifyCardMatchWithOpenAI(
   listing: EbayListing,
   candidates: ScpCandidate[],
@@ -165,5 +174,158 @@ export async function verifyCardMatchWithOpenAI(
     chosenProductId: parsed.chosenProductId,
     topThreeProductIds: parsed.topThreeProductIds ?? [],
     extractedAttributes: parsed.extractedAttributes ?? {},
+  };
+}
+
+
+export async function triageNeedsReviewWithOpenAI(
+  listing: EbayListing,
+  candidates: ScpCandidate[],
+  options?: {
+    ximilarHints?: string[] | null;
+    details?: EbayListingDetails | null;
+    candidateMeta?: Array<{
+      productId: string;
+      estimatedProfit: number | null;
+      estimatedMarginPct: number | null;
+      reviewMemoryScore?: number | null;
+      cardNumberMemoryScore?: number | null;
+      aiPreferred?: boolean;
+    }>;
+  },
+): Promise<NeedsReviewTriageDecision> {
+  const listingFingerprint = buildListingFingerprint(listing, {
+    details: options?.details ?? null,
+    ximilarHints: options?.ximilarHints ?? null,
+  });
+
+  const metaByProductId = new Map(
+    (options?.candidateMeta ?? []).map((row) => [row.productId, row]),
+  );
+
+  const rankedCandidates = candidates
+    .map((candidate, index) => {
+      const fingerprint = buildScpCandidateFingerprint(candidate);
+      const fingerprintScore = scoreFingerprintSimilarity(listingFingerprint, fingerprint);
+      const meta = metaByProductId.get(candidate.productId);
+      return {
+        candidate,
+        fingerprint,
+        fingerprintScore,
+        index,
+        estimatedProfit: meta?.estimatedProfit ?? null,
+        estimatedMarginPct: meta?.estimatedMarginPct ?? null,
+        reviewMemoryScore: meta?.reviewMemoryScore ?? null,
+        cardNumberMemoryScore: meta?.cardNumberMemoryScore ?? null,
+        aiPreferred: Boolean(meta?.aiPreferred),
+      };
+    })
+    .sort((a, b) => b.fingerprintScore - a.fingerprintScore || a.index - b.index);
+
+  const inputPayload = {
+    listing: {
+      title: listing.title,
+      url: listing.itemWebUrl,
+      condition: listing.condition,
+      imageUrl: listing.imageUrl,
+      price: listing.price,
+      shipping: listing.shipping,
+      purchaseTotal: listing.total,
+      subtitle: options?.details?.subtitle ?? null,
+      description: options?.details?.description ?? null,
+      aspects: options?.details?.aspectMap ?? {},
+      fingerprint: listingFingerprint,
+    },
+    ximilarHints: options?.ximilarHints ?? [],
+    candidates: rankedCandidates.map((row) => ({
+      productId: row.candidate.productId,
+      productName: row.candidate.productName,
+      consoleName: row.candidate.consoleName,
+      ungradedSell: row.candidate.ungradedSell,
+      grade9: row.candidate.grade9,
+      psa10: row.candidate.psa10,
+      source: row.candidate.source ?? null,
+      fingerprintScore: row.fingerprintScore,
+      estimatedProfit: row.estimatedProfit,
+      estimatedMarginPct: row.estimatedMarginPct,
+      reviewMemoryScore: row.reviewMemoryScore,
+      cardNumberMemoryScore: row.cardNumberMemoryScore,
+      aiPreferred: row.aiPreferred,
+      fingerprint: row.fingerprint,
+    })),
+  };
+
+  const userContent: ResponseInputContent[] = [
+    {
+      type: 'input_text',
+      text: JSON.stringify(inputPayload),
+    },
+  ];
+
+  const imageUrls = [listing.imageUrl, ...(options?.details?.imageUrls ?? [])]
+    .filter((value): value is string => Boolean(value))
+    .filter((value, index, arr) => arr.indexOf(value) === index)
+    .slice(0, 2);
+
+  for (const imageUrl of imageUrls) {
+    userContent.push({
+      type: 'input_image',
+      image_url: imageUrl,
+      detail: 'high',
+    });
+  }
+
+  const response = await getOpenAiClient().responses.create({
+    model: 'gpt-5-mini',
+    input: [
+      {
+        role: 'system',
+        content: [
+          {
+            type: 'input_text',
+            text:
+              'You are the final triage layer for sports-card deals. Decide whether this eBay listing is worth sending to human Needs Review. Only sendToReview=true when at least one candidate looks like a credible same-card SCP match that a human could reasonably confirm. Use the image, listing details, shipping-inclusive purchase total, structured fingerprints, review-memory scores, and candidate profits. If all candidates look like weak mismatches, return sendToReview=false and explain why. Favor exact card identity over optimistic profits. Return JSON only.',
+          },
+        ],
+      },
+      {
+        role: 'user',
+        content: userContent,
+      },
+    ],
+    text: {
+      format: {
+        type: 'json_schema',
+        name: 'needs_review_triage',
+        strict: true,
+        schema: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            sendToReview: { type: 'boolean' },
+            confidence: { type: 'number' },
+            reasoning: { type: 'string' },
+            rejectReason: { type: ['string', 'null'] },
+            preferredProductId: { type: ['string', 'null'] },
+            topThreeProductIds: {
+              type: 'array',
+              items: { type: 'string' },
+              maxItems: 3,
+            },
+          },
+          required: ['sendToReview', 'confidence', 'reasoning', 'rejectReason', 'preferredProductId', 'topThreeProductIds'],
+        },
+      },
+    },
+  });
+
+  const parsed = JSON.parse(response.output_text) as NeedsReviewTriageDecision;
+  return {
+    sendToReview: parsed.sendToReview,
+    confidence: parsed.confidence,
+    reasoning: parsed.reasoning,
+    rejectReason: parsed.rejectReason ?? null,
+    preferredProductId: parsed.preferredProductId ?? null,
+    topThreeProductIds: parsed.topThreeProductIds ?? [],
   };
 }

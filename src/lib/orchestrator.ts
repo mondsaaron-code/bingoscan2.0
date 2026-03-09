@@ -30,7 +30,7 @@ import {
 } from '@/lib/db';
 import { shouldRejectListingDetails, shouldRejectTitle } from '@/lib/filters';
 import { buildListingFingerprint, buildScpCandidateFingerprint, compareFingerprintMatch } from '@/lib/card-fingerprint';
-import { verifyCardMatchWithOpenAI } from '@/lib/openai';
+import { triageNeedsReviewWithOpenAI, verifyCardMatchWithOpenAI } from '@/lib/openai';
 import {
   getSportsCardsProProduct,
   hydrateSportsCardsProCandidates,
@@ -677,7 +677,7 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
       .map((productId) => candidateFinancials.find((row) => row.candidate.productId === productId))
       .filter((row): row is NonNullable<typeof row> => Boolean(row));
 
-    const bestReviewCandidate = aiPreferredCandidates.find((row) => row.estimatedProfit !== null && row.estimatedProfit > 0 && passesThresholds(filters, row.estimatedProfit, row.estimatedMarginPct))
+    let bestReviewCandidate = aiPreferredCandidates.find((row) => row.estimatedProfit !== null && row.estimatedProfit > 0 && passesThresholds(filters, row.estimatedProfit, row.estimatedMarginPct))
       ?? profitableReviewCandidates
         .slice()
         .sort((a, b) => (b.estimatedProfit ?? Number.NEGATIVE_INFINITY) - (a.estimatedProfit ?? Number.NEGATIVE_INFINITY))[0];
@@ -687,13 +687,70 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
       return;
     }
 
-    const reviewCandidates = [
+    let reviewCandidates = [
       ...aiPreferredCandidates.map((row) => row.candidate),
       bestReviewCandidate.candidate,
       ...rankedCandidates,
     ].filter((candidate, index, arr) => arr.findIndex((row) => row.productId === candidate.productId) === index).slice(0, 3);
 
-    const reviewReason = buildNeedsReviewReason({
+    const reviewCandidateMeta = reviewCandidates.map((candidate) => {
+      const financial = candidateFinancials.find((row) => row.candidate.productId === candidate.productId);
+      const rankedRow = rankedCandidateRows.find((row) => row.candidate.productId === candidate.productId);
+      return {
+        productId: candidate.productId,
+        estimatedProfit: financial?.estimatedProfit ?? null,
+        estimatedMarginPct: financial?.estimatedMarginPct ?? null,
+        reviewMemoryScore: rankedRow?.reviewMemory.score ?? 0,
+        cardNumberMemoryScore: rankedRow?.cardNumberMemory.score ?? 0,
+        aiPreferred: decision.topThreeProductIds.includes(candidate.productId),
+      };
+    });
+
+    const triageOutcome = await withProviderRetries('openai', 'needs review triage', () => triageNeedsReviewWithOpenAI(listing, reviewCandidates, {
+      ximilarHints: ximilarHints?.titleHints ?? [],
+      details,
+      candidateMeta: reviewCandidateMeta,
+    }), {
+      scanId,
+      stage: 'ai_verifying',
+      attempts: 1,
+    });
+
+    if (triageOutcome.ok) {
+      await incrementUsage('openai', 1);
+      await appendMetrics(scanId, { openaiCalls: 1 });
+      if (!triageOutcome.value.sendToReview) {
+        const rejectReason = triageOutcome.value.rejectReason
+          ?? 'OpenAI review triage rejected the listing because none of the SCP options looked credible enough to review.';
+        await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: rejectReason });
+        await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+        await addScanEvent(scanId, 'info', 'ai_verifying', 'Rejected listing before Needs Review', `${listing.title}
+${rejectReason}
+${triageOutcome.value.reasoning}`);
+        return;
+      }
+
+      const triageTop = triageOutcome.value.topThreeProductIds
+        .map((productId) => reviewCandidates.find((candidate) => candidate.productId === productId))
+        .filter((candidate): candidate is ScpCandidate => Boolean(candidate));
+      const triagePreferred = triageOutcome.value.preferredProductId
+        ? reviewCandidates.find((candidate) => candidate.productId === triageOutcome.value.preferredProductId) ?? null
+        : null;
+      reviewCandidates = [
+        ...(triagePreferred ? [triagePreferred] : []),
+        ...triageTop,
+        ...reviewCandidates,
+      ].filter((candidate, index, arr) => arr.findIndex((row) => row.productId === candidate.productId) === index).slice(0, 3);
+
+      if (triagePreferred) {
+        const preferredFinancial = candidateFinancials.find((row) => row.candidate.productId === triagePreferred.productId);
+        if (preferredFinancial && preferredFinancial.estimatedProfit !== null && preferredFinancial.estimatedProfit > 0 && passesThresholds(filters, preferredFinancial.estimatedProfit, preferredFinancial.estimatedMarginPct)) {
+          bestReviewCandidate = preferredFinancial;
+        }
+      }
+    }
+
+    const reviewReasonBase = buildNeedsReviewReason({
       decision,
       autoAcceptThreshold,
       listing,
@@ -701,6 +758,15 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
       chosen: bestReviewCandidate.candidate,
       rankedCandidates: reviewCandidates,
     });
+    const reviewReason = triageOutcome.ok
+      ? `${reviewReasonBase} • Final review triage: ${triageOutcome.value.reasoning}`
+      : reviewReasonBase;
+
+    const reviewShortlistIds = new Set<string>([
+      ...decision.topThreeProductIds,
+      ...(triageOutcome.ok ? triageOutcome.value.topThreeProductIds : []),
+      ...(triageOutcome.ok && triageOutcome.value.preferredProductId ? [triageOutcome.value.preferredProductId] : []),
+    ]);
 
     const resultId = await insertResultPayload(
       scanId,
@@ -722,13 +788,14 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     );
     await insertReviewOptions(
       resultId,
-      reviewCandidates.map((candidate, index) => reviewOptionPayload(listing, details, candidate, index + 1, decision.confidence, decision.topThreeProductIds.includes(candidate.productId))),
+      reviewCandidates.map((candidate, index) => reviewOptionPayload(listing, details, candidate, index + 1, triageOutcome.ok ? triageOutcome.value.confidence : decision.confidence, reviewShortlistIds.has(candidate.productId))),
     );
     await appendMetrics(scanId, { needsReview: 1 });
-    await updateCandidate(candidateId, { stage: 'needs_review', ai_confidence: decision.confidence, ai_reasoning: decision.reasoning });
+    await updateCandidate(candidateId, { stage: 'needs_review', ai_confidence: triageOutcome.ok ? triageOutcome.value.confidence : decision.confidence, ai_reasoning: triageOutcome.ok ? `${decision.reasoning} • ${triageOutcome.value.reasoning}` : decision.reasoning });
     await addScanEvent(scanId, 'warning', 'ai_verifying', 'Sent listing to Needs Review', `${listing.title}
 ${reviewReason}
-${decision.reasoning}`);
+${decision.reasoning}${triageOutcome.ok ? `
+${triageOutcome.value.reasoning}` : ''}`);
     return;
   }
 

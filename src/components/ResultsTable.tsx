@@ -76,7 +76,7 @@ export function ResultsTable({
               <th>Image</th>
               <th>eBay Title</th>
               <th><button className="btn btn-ghost small" onClick={() => flipSort('dealScore', sortKey, sortDir, setSortKey, setSortDir)}>Deal Score</button></th>
-              <th><button className="btn btn-ghost small" onClick={() => flipSort('totalPurchasePrice', sortKey, sortDir, setSortKey, setSortDir)}>Purchase Total</button></th>
+              <th><button className="btn btn-ghost small" onClick={() => flipSort('totalPurchasePrice', sortKey, sortDir, setSortKey, setSortDir)}>eBay Total</button></th>
               <th><button className="btn btn-ghost small" onClick={() => flipSort('estimatedProfit', sortKey, sortDir, setSortKey, setSortDir)}>Profit</button></th>
               <th>SCP Ungraded</th>
               <th>Grade 9</th>
@@ -140,7 +140,10 @@ export function ResultsTable({
                     ) : null}
                   </td>
                   <td><span className="badge">{dealScore}</span></td>
-                  <td>{toCurrency(row.totalPurchasePrice)}</td>
+                  <td>
+                    <div>{toCurrency(row.totalPurchasePrice)}</div>
+                    <div className="small muted">{toCurrency(row.purchasePrice)} item + {toCurrency(row.shippingPrice)} ship</div>
+                  </td>
                   <td>{toCurrency(row.estimatedProfit)}</td>
                   <td>{toCurrency(row.scpUngradedSell)}</td>
                   <td>{toCurrency(row.scpGrade9)}</td>

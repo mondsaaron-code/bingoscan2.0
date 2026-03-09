@@ -37,7 +37,7 @@ export function SearchForm({ onStart, isBusy }: { onStart: (filters: SearchFormT
       <div className="spread">
         <div>
           <h2 className="section-title">Search Parameters</h2>
-          <div className="muted small">Broad search by default. Add as much detail as you want.</div>
+          <div className="muted small">Broad search by default. Purchase price filters use the eBay item price plus seller shipping.</div>
         </div>
         <button className="btn btn-primary" type="submit" disabled={isBusy}>
           {isBusy ? 'Scan Running...' : 'Begin Scan'}
@@ -56,8 +56,8 @@ export function SearchForm({ onStart, isBusy }: { onStart: (filters: SearchFormT
         {renderText('Player Name', filters.playerName ?? '', (value) => update('playerName', value || undefined))}
         {renderText('Position', filters.position ?? '', (value) => update('position', value || undefined))}
         {renderText('Team', filters.team ?? '', (value) => update('team', value || undefined))}
-        {renderNumber('Min Purchase Price', filters.minPurchasePrice, (value) => update('minPurchasePrice', value))}
-        {renderNumber('Max Purchase Price', filters.maxPurchasePrice, (value) => update('maxPurchasePrice', value))}
+        {renderNumber('Min Purchase Total (incl. ship)', filters.minPurchasePrice, (value) => update('minPurchasePrice', value))}
+        {renderNumber('Max Purchase Total (incl. ship)', filters.maxPurchasePrice, (value) => update('maxPurchasePrice', value))}
         {renderNumber('Min Profit $', filters.minProfit, (value) => update('minProfit', value))}
         {renderNumber('Min Margin %', filters.minMarginPct, (value) => update('minMarginPct', value))}
       </div>
