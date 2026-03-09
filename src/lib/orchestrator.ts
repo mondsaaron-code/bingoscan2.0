@@ -75,7 +75,7 @@ const TARGET_RESULTS = 10;
 const FETCH_PAGE_SIZE = 40;
 const MAX_CANDIDATES_PER_TICK = 3;
 const MIN_CANDIDATES_PER_TICK = 1;
-const AUTO_ACCEPT_CONFIDENCE = 90;
+const AUTO_ACCEPT_CONFIDENCE = 88;
 const BAD_LOGIC_CACHE_TTL_MS = 2 * 60 * 1000;
 const TITLE_OUTCOME_CACHE_TTL_MS = 2 * 60 * 1000;
 const SELLER_OUTCOME_CACHE_TTL_MS = 10 * 60 * 1000;
@@ -657,7 +657,7 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     ? scoreScpCandidateAgainstCardNumberMemory({ ebayTitle: `${listing.title} ${details?.subtitle ?? ''}`.trim(), scpProductName: chosen.productName, requestedCardNumber: filters.cardNumber ?? null }, cardNumberOutcomeMemory)
     : null;
   const cardNumberThresholdAdjustment = (chosenCardNumberSignal?.score ?? 0) <= -8 ? 4 : (chosenCardNumberSignal?.score ?? 0) >= 8 ? -2 : 0;
-  const autoAcceptThreshold = Math.max(88, Math.min(96, AUTO_ACCEPT_CONFIDENCE + cardNumberThresholdAdjustment));
+  const autoAcceptThreshold = Math.max(84, Math.min(94, AUTO_ACCEPT_CONFIDENCE + cardNumberThresholdAdjustment));
   const autoAcceptHeuristic = deriveAutoAcceptHeuristic({
     decision,
     comparison: chosenComparison,
@@ -703,6 +703,78 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
       ?? profitableReviewCandidates
         .slice()
         .sort((a, b) => (b.estimatedProfit ?? Number.NEGATIVE_INFINITY) - (a.estimatedProfit ?? Number.NEGATIVE_INFINITY))[0];
+
+    const profitableReviewRows = profitableReviewCandidates
+      .map((row) => {
+        const rankingRow = rankedCandidateRows.find((candidateRow) => candidateRow.candidate.productId === row.candidate.productId);
+        const comparison = compareFingerprintMatch(listingFingerprint, buildScpCandidateFingerprint(row.candidate));
+        return {
+          ...row,
+          comparison,
+          reviewMemoryScore: rankingRow?.reviewMemory.score ?? 0,
+          cardNumberMemoryScore: rankingRow?.cardNumberMemory.score ?? 0,
+        };
+      })
+      .sort((a, b) => {
+        const aScore = deriveSmartPublishRank(a, decision);
+        const bScore = deriveSmartPublishRank(b, decision);
+        return bScore - aScore;
+      });
+
+    const smartPublishOverride = profitableReviewRows
+      .map((row) => deriveSmartPublishOverride({
+        row,
+        decision,
+        listingQualityScore: listingQuality?.score ?? null,
+      }))
+      .find((override) => Boolean(override));
+
+    if (smartPublishOverride) {
+      const diversityDecision = await assessScanResultDiversity(scanId, listing, smartPublishOverride.candidate);
+      if (diversityDecision.rejectReason) {
+        await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: diversityDecision.rejectReason });
+        await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+        await addScanEvent(scanId, 'info', 'publishing_results', diversityDecision.rejectReason, diversityDecision.details ?? listing.title);
+        return;
+      }
+
+      await insertResultPayload(
+        scanId,
+        listing,
+        smartPublishOverride.candidate,
+        decision,
+        false,
+        null,
+        smartPublishOverride.estimatedProfit,
+        smartPublishOverride.estimatedMarginPct,
+        listingQuality,
+        details,
+        sellerOutcome,
+        scoreListingAgainstFamilyMemory({ ebayTitle: listing.title, scpProductName: smartPublishOverride.candidate.productName }, familyOutcomeMemory),
+        playerMemorySignal,
+        auctionMemorySignal,
+        priceBandMemorySignal,
+        scoreScpCandidateAgainstCardNumberMemory({ ebayTitle: `${listing.title} ${details?.subtitle ?? ''}`.trim(), scpProductName: smartPublishOverride.candidate.productName, requestedCardNumber: filters.cardNumber ?? null }, cardNumberOutcomeMemory),
+      );
+      await appendMetrics(scanId, { dealsFound: 1 });
+      await updateCandidate(candidateId, {
+        stage: 'accepted',
+        ai_confidence: decision.confidence,
+        ai_reasoning: `${decision.reasoning} • ${smartPublishOverride.reason}`,
+        scp_product_id: smartPublishOverride.candidate.productId,
+      });
+      await addScanEvent(
+        scanId,
+        'info',
+        'publishing_results',
+        'Promoted strong profitable match directly to Deals',
+        `${listing.title}
+${smartPublishOverride.reason}
+Confidence ${decision.confidence} • Profit ${(smartPublishOverride.estimatedProfit ?? 0).toFixed(2)}`,
+      );
+      return;
+    }
+
     const queueFloor = await getNeedsReviewQueueFloor(scanId, 20);
     if (queueFloor.count >= 20 && queueFloor.floorProfit !== null && (bestReviewCandidate.estimatedProfit ?? Number.NEGATIVE_INFINITY) <= queueFloor.floorProfit) {
       await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: 'Needs Review queue already holds 20 stronger profitable candidates.' });
@@ -952,6 +1024,93 @@ function deriveAutoAcceptHeuristic(args: {
   }
 
   return { treatAsExact: false, thresholdReduction: 0, reason: null };
+}
+
+
+function deriveSmartPublishRank(
+  row: {
+    candidate: ScpCandidate;
+    estimatedProfit: number | null;
+    estimatedMarginPct: number | null;
+    comparison: ReturnType<typeof compareFingerprintMatch>;
+    reviewMemoryScore: number;
+    cardNumberMemoryScore: number;
+  },
+  decision: Awaited<ReturnType<typeof verifyCardMatchWithOpenAI>>,
+): number {
+  const hardMismatches = countHardFingerprintMismatches(row.comparison.negativeSignals);
+  return (
+    row.comparison.score
+    + Math.min(18, (row.estimatedProfit ?? 0) * 1.5)
+    + Math.min(10, ((row.estimatedMarginPct ?? 0) / 5))
+    + (decision.chosenProductId === row.candidate.productId ? 8 : 0)
+    + (decision.topThreeProductIds.includes(row.candidate.productId) ? 6 : 0)
+    + row.reviewMemoryScore
+    + row.cardNumberMemoryScore
+    - (hardMismatches * 10)
+  );
+}
+
+function deriveSmartPublishOverride(args: {
+  row: {
+    candidate: ScpCandidate;
+    estimatedProfit: number | null;
+    estimatedMarginPct: number | null;
+    comparison: ReturnType<typeof compareFingerprintMatch>;
+    reviewMemoryScore: number;
+    cardNumberMemoryScore: number;
+  };
+  decision: Awaited<ReturnType<typeof verifyCardMatchWithOpenAI>>;
+  listingQualityScore?: number | null;
+}): { candidate: ScpCandidate; estimatedProfit: number | null; estimatedMarginPct: number | null; reason: string } | null {
+  const { row, decision } = args;
+  const hardMismatches = countHardFingerprintMismatches(row.comparison.negativeSignals);
+  const positiveSignals = row.comparison.positiveSignals.length;
+  const listingQualityScore = args.listingQualityScore ?? 0;
+  const isAiPreferred = decision.topThreeProductIds.includes(row.candidate.productId) || decision.chosenProductId === row.candidate.productId;
+
+  const strongProfitableAiLane = (
+    hardMismatches === 0
+    && positiveSignals >= 3
+    && row.comparison.score >= 34
+    && (row.estimatedProfit ?? 0) >= 0
+    && decision.confidence >= 64
+    && isAiPreferred
+  );
+
+  const excellentFingerprintLane = (
+    hardMismatches <= 1
+    && positiveSignals >= 4
+    && row.comparison.score >= 42
+    && decision.confidence >= 58
+  );
+
+  const learnedHistoryLane = (
+    hardMismatches === 0
+    && row.comparison.score >= 30
+    && decision.confidence >= 55
+    && (row.reviewMemoryScore >= 10 || row.cardNumberMemoryScore >= 10 || listingQualityScore >= 72)
+  );
+
+  if (!(strongProfitableAiLane || excellentFingerprintLane || learnedHistoryLane)) {
+    return null;
+  }
+
+  const reasonParts = [
+    `Fingerprint score ${Math.round(row.comparison.score)}`,
+    positiveSignals > 0 ? `${positiveSignals} positive signal${positiveSignals === 1 ? '' : 's'}` : null,
+    hardMismatches === 0 ? 'no hard mismatches' : `${hardMismatches} hard mismatch${hardMismatches === 1 ? '' : 'es'}`,
+    isAiPreferred ? 'inside AI shortlist' : null,
+    row.reviewMemoryScore >= 10 ? `review memory +${row.reviewMemoryScore}` : null,
+    row.cardNumberMemoryScore >= 10 ? `card-number memory +${row.cardNumberMemoryScore}` : null,
+  ].filter(Boolean);
+
+  return {
+    candidate: row.candidate,
+    estimatedProfit: row.estimatedProfit,
+    estimatedMarginPct: row.estimatedMarginPct,
+    reason: `Smart publish promoted a profitable candidate (${reasonParts.join(' • ')}).`,
+  };
 }
 
 function decideWeakReviewRejection(args: {

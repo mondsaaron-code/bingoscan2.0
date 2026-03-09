@@ -31,6 +31,7 @@ Use more AI in a way that increases purchase-ready hits and decreases manual cor
 - Review options now carry positive and negative fingerprint signals for faster human selection.
 - Review resolutions now log top-1/top-3 hit data so future tuning can be measured instead of guessed.
 - A smart auto-accept override now promotes some high-signal fingerprint matches into Deals.
+- A second-pass smart publish lane now promotes profitable AI-shortlisted matches into Deals even when the exact-match verdict is still conservative.
 - A weak-review rejection pass now blocks obvious SCP lookalikes from reaching Needs Review.
 
 ## Near-term target
