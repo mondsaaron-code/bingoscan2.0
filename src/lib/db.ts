@@ -1295,6 +1295,37 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
       .sort((a, b) => (b.estimatedProfit ?? Number.NEGATIVE_INFINITY) - (a.estimatedProfit ?? Number.NEGATIVE_INFINITY) || (b.aiConfidence ?? 0) - (a.aiConfidence ?? 0) || b.createdAt.localeCompare(a.createdAt))
       .slice(0, 20);
 
+    const reviewOptionResultIds = Array.from(new Set(
+      [...visibleResults, ...needsReviewResults]
+        .filter((row) => row.needsReview)
+        .map((row) => row.id),
+    ));
+
+    if (reviewOptionResultIds.length > 0) {
+      const { data: options, error: optionsError } = await getSupabase()
+        .from('scan_review_options')
+        .select('*')
+        .in('result_id', reviewOptionResultIds)
+        .order('rank', { ascending: true });
+      if (optionsError) throw optionsError;
+      reviewOptionsByResultId = ((options ?? []) as Array<Record<string, unknown>>).reduce<Record<string, ReviewOption[]>>((acc, row) => {
+        const option = mapReviewOption(row);
+        acc[option.resultId] ||= [];
+        acc[option.resultId].push(option);
+        return acc;
+      }, {});
+
+      const adjustedVisibleResults = visibleResults
+        .map((row) => row.needsReview ? applyDisplayedReviewOption(row, reviewOptionsByResultId[row.id] ?? []) : row);
+      const demotedVisibleReviewRows = adjustedVisibleResults.filter((row) => row.needsReview && !shouldSurfaceReviewRowAsDeal(row, reviewOptionsByResultId[row.id] ?? []));
+      visibleResults = adjustedVisibleResults.filter((row) => !row.needsReview || shouldSurfaceReviewRowAsDeal(row, reviewOptionsByResultId[row.id] ?? []));
+
+      needsReviewResults = [...needsReviewResults.map((row) => applyDisplayedReviewOption(row, reviewOptionsByResultId[row.id] ?? [])), ...demotedVisibleReviewRows]
+        .filter((row, index, arr) => arr.findIndex((candidate) => candidate.id === row.id) === index)
+        .sort((a, b) => (b.estimatedProfit ?? Number.NEGATIVE_INFINITY) - (a.estimatedProfit ?? Number.NEGATIVE_INFINITY) || (b.aiConfidence ?? 0) - (a.aiConfidence ?? 0) || b.createdAt.localeCompare(a.createdAt))
+        .slice(0, 20);
+    }
+
     const mappedEvents = ((eventRows ?? []) as Array<Record<string, unknown>>).map((row) => ({
       id: String(row.id),
       level: row.level as 'info' | 'warning' | 'error',
@@ -1310,20 +1341,6 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
       stageTimings: buildStageTimings(latestScan, mappedEvents),
     };
 
-    if (needsReviewResults.length > 0) {
-      const { data: options, error: optionsError } = await getSupabase()
-        .from('scan_review_options')
-        .select('*')
-        .in('result_id', needsReviewResults.map((row) => row.id))
-        .order('rank', { ascending: true });
-      if (optionsError) throw optionsError;
-      reviewOptionsByResultId = ((options ?? []) as Array<Record<string, unknown>>).reduce<Record<string, ReviewOption[]>>((acc, row) => {
-        const option = mapReviewOption(row);
-        acc[option.resultId] ||= [];
-        acc[option.resultId].push(option);
-        return acc;
-      }, {});
-    }
   }
 
   const [usage, reviewLearning] = await Promise.all([getUsageSnapshot(), getReviewLearningSnapshot()]);
@@ -1448,6 +1465,56 @@ function mapReviewOption(row: Record<string, unknown>): ReviewOption {
     negativeSignals: safeJsonParse<string[]>(row.negative_signals, []).map(String).slice(0, 5),
     aiPreferred: Boolean(row.ai_preferred),
   };
+}
+
+
+function pickDisplayedReviewOption(options: ReviewOption[], totalPurchasePrice: number): ReviewOption | null {
+  return [...options]
+    .sort((a, b) => scoreDisplayedReviewOption(b, totalPurchasePrice) - scoreDisplayedReviewOption(a, totalPurchasePrice) || a.rank - b.rank)
+    [0] ?? null;
+}
+
+function scoreDisplayedReviewOption(option: ReviewOption, totalPurchasePrice: number): number {
+  const profit = option.scpUngradedSell !== null ? option.scpUngradedSell - totalPurchasePrice : Number.NEGATIVE_INFINITY;
+  const hardMismatchPenalty = option.negativeSignals.filter((signal) => /mismatch/i.test(signal)).length * 10;
+  return (
+    (option.aiPreferred ? 18 : 0)
+    + (option.matchScore ?? 0)
+    + ((option.confidence ?? 0) / 6)
+    + Math.max(-20, Math.min(16, profit))
+    - hardMismatchPenalty
+    - ((option.rank - 1) * 2)
+  );
+}
+
+function applyDisplayedReviewOption(row: ScanResultRow, options: ReviewOption[]): ScanResultRow {
+  const displayOption = pickDisplayedReviewOption(options, row.totalPurchasePrice);
+  if (!displayOption) return row;
+  const estimatedProfit = displayOption.scpUngradedSell !== null ? displayOption.scpUngradedSell - row.totalPurchasePrice : null;
+  const estimatedMarginPct = displayOption.scpUngradedSell !== null && row.totalPurchasePrice > 0
+    ? ((displayOption.scpUngradedSell - row.totalPurchasePrice) / row.totalPurchasePrice) * 100
+    : null;
+  return {
+    ...row,
+    scpProductId: displayOption.scpProductId,
+    scpProductName: displayOption.scpProductName,
+    scpLink: displayOption.scpLink,
+    scpUngradedSell: displayOption.scpUngradedSell,
+    scpGrade9: displayOption.scpGrade9,
+    scpPsa10: displayOption.scpPsa10,
+    estimatedProfit,
+    estimatedMarginPct,
+  };
+}
+
+function shouldSurfaceReviewRowAsDeal(row: ScanResultRow, options: ReviewOption[]): boolean {
+  const displayOption = pickDisplayedReviewOption(options, row.totalPurchasePrice);
+  if (!displayOption) return false;
+  const profit = displayOption.scpUngradedSell !== null ? displayOption.scpUngradedSell - row.totalPurchasePrice : Number.NEGATIVE_INFINITY;
+  const hardMismatches = displayOption.negativeSignals.filter((signal) => /mismatch/i.test(signal)).length;
+  const matchScore = displayOption.matchScore ?? 0;
+  const confidence = displayOption.confidence ?? row.aiConfidence ?? 0;
+  return profit > 0 && ((displayOption.aiPreferred && matchScore >= 18 && hardMismatches <= 1) || (matchScore >= 28 && confidence >= 60 && hardMismatches === 0));
 }
 
 

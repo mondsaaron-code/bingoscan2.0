@@ -699,11 +699,6 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
       .map((productId) => candidateFinancials.find((row) => row.candidate.productId === productId))
       .filter((row): row is NonNullable<typeof row> => Boolean(row));
 
-    const bestReviewCandidate = aiPreferredCandidates.find((row) => row.estimatedProfit !== null && row.estimatedProfit > 0 && passesThresholds(filters, row.estimatedProfit, row.estimatedMarginPct))
-      ?? profitableReviewCandidates
-        .slice()
-        .sort((a, b) => (b.estimatedProfit ?? Number.NEGATIVE_INFINITY) - (a.estimatedProfit ?? Number.NEGATIVE_INFINITY))[0];
-
     const profitableReviewRows = profitableReviewCandidates
       .map((row) => {
         const rankingRow = rankedCandidateRows.find((candidateRow) => candidateRow.candidate.productId === row.candidate.productId);
@@ -720,6 +715,12 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
         const bScore = deriveSmartPublishRank(b, decision);
         return bScore - aScore;
       });
+
+    const primaryReviewRow = pickPrimaryReviewRow(profitableReviewRows, decision) ?? profitableReviewRows[0];
+    if (!primaryReviewRow) {
+      await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: 'No review candidate could be chosen for display.' });
+      return;
+    }
 
     const smartPublishOverride = profitableReviewRows
       .map((row) => deriveSmartPublishOverride({
@@ -776,14 +777,14 @@ Confidence ${decision.confidence} • Profit ${(smartPublishOverride.estimatedPr
     }
 
     const queueFloor = await getNeedsReviewQueueFloor(scanId, 20);
-    if (queueFloor.count >= 20 && queueFloor.floorProfit !== null && (bestReviewCandidate.estimatedProfit ?? Number.NEGATIVE_INFINITY) <= queueFloor.floorProfit) {
+    if (queueFloor.count >= 20 && queueFloor.floorProfit !== null && (primaryReviewRow.estimatedProfit ?? Number.NEGATIVE_INFINITY) <= queueFloor.floorProfit) {
       await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: 'Needs Review queue already holds 20 stronger profitable candidates.' });
       return;
     }
 
     const reviewCandidates = [
       ...aiPreferredCandidates.map((row) => row.candidate),
-      bestReviewCandidate.candidate,
+      primaryReviewRow.candidate,
       ...rankedCandidates,
     ].filter((candidate, index, arr) => arr.findIndex((row) => row.productId === candidate.productId) === index).slice(0, 3);
 
@@ -809,27 +810,27 @@ Confidence ${decision.confidence} • Profit ${(smartPublishOverride.estimatedPr
       autoAcceptThreshold: effectiveAutoAcceptThreshold,
       listing,
       details,
-      chosen: bestReviewCandidate.candidate,
+      chosen: primaryReviewRow.candidate,
       rankedCandidates: reviewCandidates,
     });
 
     const resultId = await insertResultPayload(
       scanId,
       listing,
-      bestReviewCandidate.candidate,
+      primaryReviewRow.candidate,
       decision,
       true,
       reviewReason,
-      bestReviewCandidate.estimatedProfit,
-      bestReviewCandidate.estimatedMarginPct,
+      primaryReviewRow.estimatedProfit,
+      primaryReviewRow.estimatedMarginPct,
       listingQuality,
       details,
       sellerOutcome,
-      scoreListingAgainstFamilyMemory({ ebayTitle: listing.title, scpProductName: bestReviewCandidate.candidate.productName }, familyOutcomeMemory),
+      scoreListingAgainstFamilyMemory({ ebayTitle: listing.title, scpProductName: primaryReviewRow.candidate.productName }, familyOutcomeMemory),
       playerMemorySignal,
       auctionMemorySignal,
       priceBandMemorySignal,
-      scoreScpCandidateAgainstCardNumberMemory({ ebayTitle: `${listing.title} ${details?.subtitle ?? ''}`.trim(), scpProductName: bestReviewCandidate.candidate.productName, requestedCardNumber: filters.cardNumber ?? null }, cardNumberOutcomeMemory),
+      scoreScpCandidateAgainstCardNumberMemory({ ebayTitle: `${listing.title} ${details?.subtitle ?? ''}`.trim(), scpProductName: primaryReviewRow.candidate.productName, requestedCardNumber: filters.cardNumber ?? null }, cardNumberOutcomeMemory),
     );
     await insertReviewOptions(
       resultId,
@@ -1049,6 +1050,45 @@ function deriveSmartPublishRank(
     + row.cardNumberMemoryScore
     - (hardMismatches * 10)
   );
+}
+
+function derivePrimaryReviewRank(
+  row: {
+    candidate: ScpCandidate;
+    estimatedProfit: number | null;
+    estimatedMarginPct: number | null;
+    comparison: ReturnType<typeof compareFingerprintMatch>;
+    reviewMemoryScore: number;
+    cardNumberMemoryScore: number;
+  },
+  decision: Awaited<ReturnType<typeof verifyCardMatchWithOpenAI>>,
+): number {
+  const hardMismatches = countHardFingerprintMismatches(row.comparison.negativeSignals);
+  const positiveSignals = row.comparison.positiveSignals.length;
+  return (
+    (decision.chosenProductId === row.candidate.productId ? 26 : 0)
+    + (decision.topThreeProductIds.includes(row.candidate.productId) ? 14 : 0)
+    + row.comparison.score
+    + (positiveSignals * 4)
+    + row.reviewMemoryScore
+    + row.cardNumberMemoryScore
+    + Math.min(10, (row.estimatedProfit ?? 0))
+    - (hardMismatches * 14)
+  );
+}
+
+function pickPrimaryReviewRow(
+  rows: Array<{
+    candidate: ScpCandidate;
+    estimatedProfit: number | null;
+    estimatedMarginPct: number | null;
+    comparison: ReturnType<typeof compareFingerprintMatch>;
+    reviewMemoryScore: number;
+    cardNumberMemoryScore: number;
+  }>,
+  decision: Awaited<ReturnType<typeof verifyCardMatchWithOpenAI>>,
+) {
+  return [...rows].sort((a, b) => derivePrimaryReviewRank(b, decision) - derivePrimaryReviewRank(a, decision))[0] ?? null;
 }
 
 function deriveSmartPublishOverride(args: {
