@@ -97,3 +97,27 @@ Before major AI changes, compare them against a held-out set of historical revie
 
 - Deals now only surface review-backed rows when the displayed SCP option clears a minimum match-quality bar; weak review rows stay in Needs Review.
 - Review-backed rows now use a primary SCP display candidate chosen by AI shortlist + fingerprint quality, not just highest profit.
+
+
+## Sniper pivot now in repo
+The repo now defaults to a sniper lane instead of a broad matcher.
+
+### Current sniper default
+- Football
+- 2024
+- Panini Prizm
+- numbered cards
+- raw only
+
+### New sniper behavior
+- The search form boots with the sniper defaults already loaded.
+- A scan only activates the sniper gates when it is a single-year numbered raw scan with a clear set family.
+- In sniper mode, eBay listings are rejected early unless they clearly show the year, set family, numbered status, and a card number.
+- In sniper mode, SCP candidates are pruned harder before OpenAI sees them.
+- Deals now require a stronger family/card-number alignment before they can publish.
+- Needs Review should shrink because weak same-player wrong-variant SCP rows are filtered out earlier.
+
+### What future versions should protect in sniper mode
+- Do not let a different card number leak through just because profit looks good.
+- Do not let a different set family leak through just because the player is right.
+- Do not treat broad scans as sniper scans unless the scope is genuinely narrow enough.

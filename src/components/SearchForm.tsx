@@ -1,27 +1,14 @@
 'use client';
 
 import { useState, type FormEvent, type ChangeEvent } from 'react';
+import { getSniperDefaultFilters, getSniperProfile } from '@/lib/sniper';
 import type { SearchForm as SearchFormType } from '@/types/app';
 
-const defaultFilters: SearchFormType = {
-  sport: 'Football',
-  conditionMode: 'raw',
-  listingMode: 'buy_now',
-  rookie: false,
-  autographed: false,
-  memorabilia: false,
-  numberedCard: false,
-  startYear: null,
-  endYear: null,
-  auctionHours: null,
-  minPurchasePrice: null,
-  maxPurchasePrice: null,
-  minProfit: null,
-  minMarginPct: null,
-};
+const defaultFilters: SearchFormType = getSniperDefaultFilters();
 
 export function SearchForm({ onStart, isBusy }: { onStart: (filters: SearchFormType) => Promise<void>; isBusy: boolean }) {
   const [filters, setFilters] = useState<SearchFormType>(defaultFilters);
+  const sniperProfile = getSniperProfile(filters);
 
   function update<K extends keyof SearchFormType>(key: K, value: SearchFormType[K]) {
     setFilters((current) => ({ ...current, [key]: value }));
@@ -37,11 +24,18 @@ export function SearchForm({ onStart, isBusy }: { onStart: (filters: SearchFormT
       <div className="spread">
         <div>
           <h2 className="section-title">Search Parameters</h2>
-          <div className="muted small">Broad search by default. Add as much detail as you want.</div>
+          <div className="muted small">Sniper defaults loaded: Football • 2024 • Panini Prizm • numbered • raw. Deals only clear when the card family and card number line up.</div>
         </div>
-        <button className="btn btn-primary" type="submit" disabled={isBusy}>
-          {isBusy ? 'Scan Running...' : 'Begin Scan'}
-        </button>
+        <div className="row" style={{ gap: 10, display: 'flex', alignItems: 'center' }}>
+          <button className="btn" type="button" onClick={() => setFilters(getSniperDefaultFilters())} disabled={isBusy}>Reset sniper defaults</button>
+          <button className="btn btn-primary" type="submit" disabled={isBusy}>
+            {isBusy ? 'Scan Running...' : 'Begin Scan'}
+          </button>
+        </div>
+      </div>
+
+      <div className="badge" style={{ width: 'fit-content' }}>
+        {sniperProfile.active ? `Sniper lane active: ${sniperProfile.label}` : 'Broad mode: add a single year + set family + numbered raw to activate the sniper gates.'}
       </div>
 
       <div className="grid grid-4">
@@ -56,8 +50,8 @@ export function SearchForm({ onStart, isBusy }: { onStart: (filters: SearchFormT
         {renderText('Player Name', filters.playerName ?? '', (value) => update('playerName', value || undefined))}
         {renderText('Position', filters.position ?? '', (value) => update('position', value || undefined))}
         {renderText('Team', filters.team ?? '', (value) => update('team', value || undefined))}
-        {renderNumber('Min Purchase Price', filters.minPurchasePrice, (value) => update('minPurchasePrice', value))}
-        {renderNumber('Max Purchase Price', filters.maxPurchasePrice, (value) => update('maxPurchasePrice', value))}
+        {renderNumber('Min Purchase Price (incl. ship)', filters.minPurchasePrice, (value) => update('minPurchasePrice', value))}
+        {renderNumber('Max Purchase Price (incl. ship)', filters.maxPurchasePrice, (value) => update('maxPurchasePrice', value))}
         {renderNumber('Min Profit $', filters.minProfit, (value) => update('minProfit', value))}
         {renderNumber('Min Margin %', filters.minMarginPct, (value) => update('minMarginPct', value))}
       </div>

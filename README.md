@@ -6,12 +6,12 @@ Fresh Next.js + Supabase repo for scanning eBay sports card listings, matching t
 
 - Supabase email/password login
 - Dark mode deal dashboard
-- Search form with broad free-text search controls
+- Search form now boots with a sniper preset for Football • 2024 • Panini Prizm • numbered • raw
 - Buy It Now default, auction optional
 - Raw / Graded / Any selector
 - Browser-driven worker ticks for Vercel-safe scanning
 - eBay 24-hour dedupe
-- Needs Review queue with top 3 SCP options
+- Needs Review queue with top 3 SCP options after sniper candidate pruning
 - Bulk dispositions and diagnostics panel
 - Daily usage counters for eBay, SCP, OpenAI, and Ximilar
 
@@ -25,6 +25,9 @@ Fresh Next.js + Supabase repo for scanning eBay sports card listings, matching t
 - CSV caching abstraction is scaffolded, but direct premium SCP CSV automation still needs your live account flow validated
 
 ## Strategy and roadmap
+
+The current repo direction is a **sniper scanner**, not a broad universal matcher. The near-term goal is fewer cards, higher precision, and far less manual review.
+
 
 - `docs/project-spec.md` — living project handoff, product goals, current architecture, and next milestone
 - `docs/ai-roadmap.md` — the AI improvement path future versions should follow

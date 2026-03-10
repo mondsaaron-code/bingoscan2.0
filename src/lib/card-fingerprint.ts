@@ -8,10 +8,12 @@ export type CardFingerprint = {
   playerName: string | null;
   brand: string | null;
   setName: string | null;
+  familyKey: string | null;
   cardNumber: string | null;
   parallel: string | null;
   serialNumbered: boolean | null;
   serialNumberText: string | null;
+  serialNumberDenominator: string | null;
   rookie: boolean | null;
   autograph: boolean | null;
   memorabilia: boolean | null;
@@ -116,6 +118,33 @@ const SET_HINTS = [
   'blue scope',
   'white sparkle',
   'checkerboard',
+  'prizm',
+  'select',
+  'optic',
+  'mosaic',
+];
+
+const FAMILY_TERMS = [
+  'panini prizm',
+  'prizm',
+  'panini select',
+  'select',
+  'panini optic',
+  'optic',
+  'panini mosaic',
+  'mosaic',
+  'topps chrome',
+  'bowman chrome',
+  'donruss optic',
+  'donruss',
+  'rookie ticket',
+  'downtown',
+  'kaboom',
+  'color blast',
+  'my house',
+  'stained glass',
+  'genesis',
+  'checkerboard',
 ];
 
 export function buildListingFingerprint(
@@ -150,6 +179,15 @@ export function scoreFingerprintSimilarity(listingFingerprint: CardFingerprint, 
   return compareFingerprintMatch(listingFingerprint, candidateFingerprint).score;
 }
 
+export function normalizeFamilyKey(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const normalized = compactWhitespace(String(value)).toLowerCase();
+  for (const family of [...FAMILY_TERMS].sort((a, b) => b.length - a.length)) {
+    if (normalized.includes(family)) return family.replace(/^panini\s+/, '');
+  }
+  return null;
+}
+
 export function compareFingerprintMatch(listingFingerprint: CardFingerprint, candidateFingerprint: CardFingerprint): FingerprintComparison {
   let score = 0;
   const positiveSignals: string[] = [];
@@ -162,6 +200,15 @@ export function compareFingerprintMatch(listingFingerprint: CardFingerprint, can
     } else {
       score -= 12;
       negativeSignals.push(`Year mismatch (${listingFingerprint.year} vs ${candidateFingerprint.year})`);
+    }
+  }
+  if (listingFingerprint.familyKey && candidateFingerprint.familyKey) {
+    if (listingFingerprint.familyKey === candidateFingerprint.familyKey) {
+      score += 18;
+      positiveSignals.push(`Set family ${candidateFingerprint.familyKey}`);
+    } else {
+      score -= 18;
+      negativeSignals.push(`Set family mismatch (${listingFingerprint.familyKey} vs ${candidateFingerprint.familyKey})`);
     }
   }
   if (listingFingerprint.cardNumber && candidateFingerprint.cardNumber) {
@@ -189,6 +236,15 @@ export function compareFingerprintMatch(listingFingerprint: CardFingerprint, can
     } else {
       score -= 6;
       negativeSignals.push('Serial-numbering mismatch');
+    }
+  }
+  if (listingFingerprint.serialNumberDenominator && candidateFingerprint.serialNumberDenominator) {
+    if (listingFingerprint.serialNumberDenominator === candidateFingerprint.serialNumberDenominator) {
+      score += 6;
+      positiveSignals.push(`Print run /${listingFingerprint.serialNumberDenominator}`);
+    } else {
+      score -= 5;
+      negativeSignals.push(`Print-run mismatch (/${listingFingerprint.serialNumberDenominator} vs /${candidateFingerprint.serialNumberDenominator})`);
     }
   }
   if (listingFingerprint.autograph !== null && candidateFingerprint.autograph !== null) {
@@ -222,10 +278,18 @@ export function compareFingerprintMatch(listingFingerprint: CardFingerprint, can
     if (listingFingerprint.brand === candidateFingerprint.brand) {
       score += 8;
       positiveSignals.push(`Brand ${candidateFingerprint.brand}`);
-    } else {
+    } else if (!normalizeFamilyKey(listingFingerprint.brand) || !normalizeFamilyKey(candidateFingerprint.brand) || normalizeFamilyKey(listingFingerprint.brand) !== normalizeFamilyKey(candidateFingerprint.brand)) {
       score -= 6;
       negativeSignals.push(`Brand mismatch (${listingFingerprint.brand} vs ${candidateFingerprint.brand})`);
     }
+  }
+  if (listingFingerprint.raw === true && candidateFingerprint.graded === true) {
+    score -= 6;
+    negativeSignals.push('Grading mismatch (listing raw, SCP graded)');
+  }
+  if (listingFingerprint.graded === true && candidateFingerprint.raw === true) {
+    score -= 6;
+    negativeSignals.push('Grading mismatch (listing graded, SCP raw)');
   }
 
   const overlap = listingFingerprint.tokens.filter((token) => candidateFingerprint.tokens.includes(token));
@@ -253,10 +317,12 @@ function buildFingerprintFromText(
   const playerName = firstAspectValue(aspectMap, ['player athlete', 'athlete', 'player']) ?? null;
   const team = firstAspectValue(aspectMap, ['team', 'professional sports authen']) ?? null;
   const brand = extractBestTerm(normalizedText, BRAND_TERMS) ?? firstAspectValue(aspectMap, ['manufacturer', 'brand']);
-  const setName = firstAspectValue(aspectMap, ['set']) ?? extractBestTerm(normalizedText, SET_HINTS);
+  const setName = firstAspectValue(aspectMap, ['set', 'insert set']) ?? extractBestTerm(normalizedText, SET_HINTS);
+  const familyKey = normalizeFamilyKey([brand, setName, normalizedText].filter(Boolean).join(' '));
   const cardNumber = firstAspectValue(aspectMap, ['card number']) ?? extractCardNumber(normalizedText);
   const parallel = firstAspectValue(aspectMap, ['parallel variety', 'parallel']) ?? extractBestTerm(normalizedText, PARALLEL_TERMS);
   const serialNumberText = firstAspectValue(aspectMap, ['print run', 'serial number', 'serial numbered']) ?? extractSerialNumberText(normalizedText);
+  const serialNumberDenominator = extractSerialNumberDenominator(serialNumberText);
   const serialNumbered = serialNumberText ? true : inferBoolean(normalizedText, ['numbered', '/'], ['unnumbered']);
   const rookie = inferBoolean(normalizedText, ['rookie', 'rc'], ['non rookie']);
   const autograph = inferBoolean(normalizedText, ['auto', 'autograph'], ['non auto', 'no auto']);
@@ -264,7 +330,7 @@ function buildFingerprintFromText(
   const graded = inferBoolean(`${normalizedText} ${options.condition ?? ''}`.toLowerCase(), ['psa', 'bgs', 'sgc', 'cgc', 'graded'], ['raw']);
   const raw = inferBoolean(`${normalizedText} ${options.condition ?? ''}`.toLowerCase(), ['raw', 'ungraded'], ['graded', 'psa', 'bgs', 'sgc', 'cgc']);
 
-  const keyHints = [year, playerName, brand, setName, cardNumber, parallel, serialNumberText]
+  const keyHints = [year, playerName, brand, setName, familyKey, cardNumber, parallel, serialNumberText]
     .filter((value): value is string => Boolean(value))
     .slice(0, 8);
 
@@ -274,10 +340,12 @@ function buildFingerprintFromText(
     playerName,
     brand,
     setName,
+    familyKey,
     cardNumber,
     parallel,
     serialNumbered,
     serialNumberText,
+    serialNumberDenominator,
     rookie,
     autograph,
     memorabilia,
@@ -290,24 +358,30 @@ function buildFingerprintFromText(
 }
 
 function extractYear(text: string): string | null {
-  const match = text.match(/\b(19\d{2}|20\d{2})\b/);
+  const match = text.match(/(19\d{2}|20\d{2})/);
   return match?.[1] ?? null;
 }
 
 function extractCardNumber(text: string): string | null {
   const hashMatch = text.match(/(?:^|\s)#\s*([a-z0-9-]{1,10})(?=\s|$)/i);
   if (hashMatch?.[1]) return hashMatch[1].toUpperCase();
-  const numberMatch = text.match(/\b(?:card|no|number)\s*#?\s*([a-z0-9-]{1,10})\b/i);
+  const numberMatch = text.match(/(?:card|no|number)\s*#?\s*([a-z0-9-]{1,10})/i);
   return numberMatch?.[1]?.toUpperCase() ?? null;
 }
 
 function extractSerialNumberText(text: string): string | null {
-  const match = text.match(/\b\d+\s*\/\s*\d+\b/);
+  const match = text.match(/\d+\s*\/\s*\d+/);
   return match ? match[0].replace(/\s+/g, '') : null;
 }
 
+function extractSerialNumberDenominator(value: string | null): string | null {
+  if (!value) return null;
+  const match = value.match(/\/(\d+)/);
+  return match?.[1] ?? null;
+}
+
 function extractBestTerm(text: string, terms: string[]): string | null {
-  for (const term of terms.sort((a, b) => b.length - a.length)) {
+  for (const term of [...terms].sort((a, b) => b.length - a.length)) {
     if (text.includes(term)) return term;
   }
   return null;

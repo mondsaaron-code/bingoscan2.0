@@ -30,6 +30,7 @@ import {
 } from '@/lib/db';
 import { shouldRejectListingDetails, shouldRejectTitle } from '@/lib/filters';
 import { buildListingFingerprint, buildScpCandidateFingerprint, compareFingerprintMatch } from '@/lib/card-fingerprint';
+import { candidateClearsSniperDealGate, candidateIsPlausibleSniperReview, filterCandidatesForSniperLane, getSniperProfile, validateListingForSniperLane } from '@/lib/sniper';
 import { verifyCardMatchWithOpenAI } from '@/lib/openai';
 import {
   getSportsCardsProProduct,
@@ -420,7 +421,22 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     }
   }
 
-  await addScanEvent(scanId, 'info', 'matching_scp', 'Hydrated listing quality', `${listingQuality.summary}${sellerOutcome ? `\n${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}${titleMemorySignal.reason ? `\nTitle memory: ${titleMemorySignal.reason}` : ''}${familyMemorySignal.reason ? `\nFamily memory: ${familyMemorySignal.reason}` : ''}${playerMemorySignal.reason ? `\nPlayer memory: ${playerMemorySignal.reason}` : ''}${auctionMemorySignal.reason ? `\nAuction memory: ${auctionMemorySignal.reason}` : ''}${priceBandMemorySignal.reason ? `\nPrice-band memory: ${priceBandMemorySignal.reason}` : ''}`);
+  const sniperProfile = getSniperProfile(filters);
+  const sniperListingGate = validateListingForSniperLane(listing, details, filters);
+  if (sniperListingGate.rejectReason) {
+    await updateCandidate(candidateId, { stage: 'filtered_out', rejection_reason: sniperListingGate.rejectReason });
+    await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+    await addScanEvent(scanId, 'info', 'filtering', sniperListingGate.rejectReason, listing.title);
+    return;
+  }
+
+  await addScanEvent(
+    scanId,
+    'info',
+    'matching_scp',
+    'Hydrated listing quality',
+    `${sniperProfile.active ? `Sniper lane: ${sniperProfile.label}\n` : ''}${listingQuality.summary}${sellerOutcome ? `\n${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}${titleMemorySignal.reason ? `\nTitle memory: ${titleMemorySignal.reason}` : ''}${familyMemorySignal.reason ? `\nFamily memory: ${familyMemorySignal.reason}` : ''}${playerMemorySignal.reason ? `\nPlayer memory: ${playerMemorySignal.reason}` : ''}${auctionMemorySignal.reason ? `\nAuction memory: ${auctionMemorySignal.reason}` : ''}${priceBandMemorySignal.reason ? `\nPrice-band memory: ${priceBandMemorySignal.reason}` : ''}${sniperListingGate.notes.length > 0 ? `\n${sniperListingGate.notes.join(' • ')}` : ''}`,
+  );
 
   const override = await getManualMatchOverride(listing.title);
   if (override) {
@@ -532,8 +548,27 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
     await addScanEvent(scanId, 'info', 'matching_scp', 'Skipped live SCP API lookup because cached CSV candidates were already available', `${candidatePool.length} cache candidate${candidatePool.length === 1 ? '' : 's'} retained`);
   }
 
+  const sniperCandidateFilter = filterCandidatesForSniperLane({
+    listing,
+    details,
+    filters,
+    candidates: candidatePool,
+    listingFingerprint: sniperListingGate.fingerprint,
+  });
+  if (sniperCandidateFilter.dropped > 0) {
+    candidatePool = sniperCandidateFilter.candidates;
+    await addScanEvent(
+      scanId,
+      'info',
+      'matching_scp',
+      'Applied sniper SCP candidate gate',
+      `${sniperCandidateFilter.dropped} candidate${sniperCandidateFilter.dropped === 1 ? '' : 's'} removed${sniperCandidateFilter.reasons.length ? `
+${sniperCandidateFilter.reasons.join(' • ')}` : ''}`,
+    );
+  }
+
   if (candidatePool.length === 0 && !override) {
-    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: 'No SportsCardsPro candidates found' });
+    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: sniperProfile.active ? 'No SCP candidates survived the sniper card-family/card-number gate.' : 'No SportsCardsPro candidates found' });
     await addScanEvent(scanId, 'warning', 'matching_scp', 'No SCP candidates found', listing.title);
     return;
   }
@@ -656,6 +691,13 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
   const chosenCardNumberSignal = chosen
     ? scoreScpCandidateAgainstCardNumberMemory({ ebayTitle: `${listing.title} ${details?.subtitle ?? ''}`.trim(), scpProductName: chosen.productName, requestedCardNumber: filters.cardNumber ?? null }, cardNumberOutcomeMemory)
     : null;
+  const sniperChosenGate = chosen
+    ? candidateClearsSniperDealGate({
+        listingFingerprint,
+        candidate: chosen,
+        filters,
+      })
+    : { ok: false, reason: 'No sniper SCP candidate selected.', score: 0, positiveSignals: [], negativeSignals: [] };
   const cardNumberThresholdAdjustment = (chosenCardNumberSignal?.score ?? 0) <= -8 ? 4 : (chosenCardNumberSignal?.score ?? 0) >= 8 ? -2 : 0;
   const autoAcceptThreshold = Math.max(84, Math.min(94, AUTO_ACCEPT_CONFIDENCE + cardNumberThresholdAdjustment));
   const autoAcceptHeuristic = deriveAutoAcceptHeuristic({
@@ -668,7 +710,7 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
   const effectiveAutoAcceptThreshold = Math.max(80, autoAcceptThreshold - autoAcceptHeuristic.thresholdReduction);
   const treatAsExactMatch = decision.exactMatch || autoAcceptHeuristic.treatAsExact;
 
-  if (!treatAsExactMatch || decision.confidence < effectiveAutoAcceptThreshold || !chosen) {
+  if (!treatAsExactMatch || decision.confidence < effectiveAutoAcceptThreshold || !chosen || (sniperProfile.active && !sniperChosenGate.ok)) {
     const diversityDecision = await assessScanResultDiversity(scanId, listing, rankedCandidates[0] ?? null);
     if (diversityDecision.rejectReason) {
       await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: diversityDecision.rejectReason });
@@ -710,6 +752,7 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
           cardNumberMemoryScore: rankingRow?.cardNumberMemory.score ?? 0,
         };
       })
+      .filter((row) => candidateIsPlausibleSniperReview({ listingFingerprint, candidate: row.candidate, filters }))
       .sort((a, b) => {
         const aScore = deriveSmartPublishRank(a, decision);
         const bScore = deriveSmartPublishRank(b, decision);
@@ -728,7 +771,7 @@ ${sellerOutcome.label}: ${sellerOutcome.detail}` : ''}`);
         decision,
         listingQualityScore: listingQuality?.score ?? null,
       }))
-      .find((override) => Boolean(override));
+      .find((override) => Boolean(override) && candidateClearsSniperDealGate({ listingFingerprint, candidate: override!.candidate, filters }).ok);
 
     if (smartPublishOverride) {
       const diversityDecision = await assessScanResultDiversity(scanId, listing, smartPublishOverride.candidate);
@@ -786,7 +829,10 @@ Confidence ${decision.confidence} • Profit ${(smartPublishOverride.estimatedPr
       ...aiPreferredCandidates.map((row) => row.candidate),
       primaryReviewRow.candidate,
       ...rankedCandidates,
-    ].filter((candidate, index, arr) => arr.findIndex((row) => row.productId === candidate.productId) === index).slice(0, 3);
+    ]
+      .filter((candidate, index, arr) => arr.findIndex((row) => row.productId === candidate.productId) === index)
+      .filter((candidate) => candidateIsPlausibleSniperReview({ listingFingerprint, candidate, filters }))
+      .slice(0, 3);
 
     const reviewCandidateRows = reviewCandidates
       .map((candidate) => rankedCandidateRows.find((row) => row.candidate.productId === candidate.productId))
@@ -841,6 +887,13 @@ Confidence ${decision.confidence} • Profit ${(smartPublishOverride.estimatedPr
     await addScanEvent(scanId, 'warning', 'ai_verifying', 'Sent listing to Needs Review', `${listing.title}
 ${reviewReason}
 ${decision.reasoning}`);
+    return;
+  }
+
+  if (sniperProfile.active && !sniperChosenGate.ok) {
+    await updateCandidate(candidateId, { stage: 'rejected', rejection_reason: sniperChosenGate.reason ?? 'Sniper gate rejected the displayed SCP match.' });
+    await appendMetrics(scanId, { candidatesFilteredOut: 1 });
+    await addScanEvent(scanId, 'info', 'ai_verifying', sniperChosenGate.reason ?? 'Sniper gate rejected the displayed SCP match.', `${listing.title}\n${sniperChosenGate.negativeSignals.join(' • ')}`);
     return;
   }
 
@@ -978,7 +1031,7 @@ async function insertResultPayload(
 }
 
 function countHardFingerprintMismatches(negativeSignals: string[]): number {
-  return negativeSignals.filter((signal) => /Year mismatch|Card # mismatch|Parallel mismatch|Serial-numbering mismatch|Autograph mismatch|Memorabilia mismatch/i.test(signal)).length;
+  return negativeSignals.filter((signal) => /Year mismatch|Card # mismatch|Parallel mismatch|Set family mismatch|Serial-numbering mismatch|Autograph mismatch|Memorabilia mismatch/i.test(signal)).length;
 }
 
 function deriveAutoAcceptHeuristic(args: {
