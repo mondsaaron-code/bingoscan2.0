@@ -106,6 +106,7 @@ export function ResultsTable({
                   <td>
                     <div><a href={row.ebayUrl} target="_blank" rel="noreferrer">{row.ebayTitle}</a></div>
                     <div className="small muted">Confidence: {row.aiConfidence ? `${row.aiConfidence}%` : '—'}</div>
+                    {row.needsReview ? <div className="small" style={{ color: '#f6d365', fontWeight: 600 }}>Review suggested — surfaced here because it still looks profitable.</div> : null}
                     <div className="small muted">eBay total: {toCurrency(row.purchasePrice)} + {toCurrency(row.shippingPrice)} shipping = {toCurrency(row.totalPurchasePrice)}</div>
                     {row.sellerUsername ? <div className="small muted">Seller: {row.sellerUsername}{row.listingQualityScore !== null ? ` · Listing ${Math.round(row.listingQualityScore)}/100` : ''}</div> : null}
                     <div className="small" style={{ color: '#d8e1f0', marginTop: 4 }}>
@@ -132,7 +133,7 @@ export function ResultsTable({
                               Ungraded {toCurrency(option.scpUngradedSell)} · Grade 9 {toCurrency(option.scpGrade9)} · PSA 10 {toCurrency(option.scpPsa10)}
                             </div>
                             <div className="row-actions" style={{ marginTop: 8 }}>
-                              <button className="btn btn-primary" onClick={() => onResolveReview(row.id, option.id)}>Use this match</button>
+                              <button className="btn btn-primary" onClick={() => onResolveReview(row.id, option.id)}>{option.scpUngradedSell !== null && option.scpUngradedSell - row.totalPurchasePrice <= 0 ? 'Use this match & hide' : 'Use this match'}</button>
                               {option.scpLink ? <a href={option.scpLink} target="_blank" rel="noreferrer">Open SCP</a> : null}
                             </div>
                           </div>

@@ -230,7 +230,7 @@ export default function DealsPage() {
       { label: 'SCP Calls Today', value: dashboard.usage.scpCallsToday },
       { label: 'OpenAI Calls Today', value: dashboard.usage.openAiCallsToday },
       { label: 'Ximilar Calls Today', value: dashboard.usage.ximilarCallsToday },
-      { label: 'Deals Found', value: scanContext?.metrics.dealsFound ?? 0 },
+      { label: 'Deals Shown', value: dashboard.visibleResults.length },
       { label: 'Needs Review', value: dashboard.needsReviewResults.length },
       { label: 'Candidates Evaluated', value: scanContext?.metrics.candidatesEvaluated ?? 0 },
     ];
@@ -399,7 +399,7 @@ export default function DealsPage() {
         </div>
         <ScpCacheLibrary caches={dashboard.scpCaches} />
 
-        <ResultsTable title="Deals" rows={dashboard.visibleResults} onDisposition={setDisposition} />
+        <ResultsTable title="Deals" rows={dashboard.visibleResults} reviewOptionsByResultId={dashboard.reviewOptionsByResultId} onDisposition={setDisposition} onResolveReview={resolveReview} />
         <NeedsReviewBoard
           rows={dashboard.needsReviewResults}
           reviewOptionsByResultId={dashboard.reviewOptionsByResultId}

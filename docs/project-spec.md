@@ -89,3 +89,8 @@ Before major AI changes, compare them against a held-out set of historical revie
 3. Build evaluation tooling from historical review outcomes.
 4. Add better visibility into why a listing became Needs Review.
 5. Only after that, expand scan intelligence and automation.
+
+## Current operator-first deal flow
+- Profitable rows can now surface directly in the Deals table even when they still carry `needs_review = true`.
+- Those rows show an inline `Review suggested` label and their top SCP options, so the operator can act from one table instead of splitting time across Deals and Needs Review.
+- The standalone Needs Review board now keeps only the leftover profitable rows that were not already surfaced into Deals.

@@ -1269,9 +1269,29 @@ export async function getDashboardSnapshot(): Promise<DashboardSnapshot> {
     if (candidateError) throw candidateError;
 
     const mapped = ((resultRows ?? []) as Array<Record<string, unknown>>).map(mapResult);
-    visibleResults = mapped.filter((row) => !row.needsReview);
+    const surfacedReviewDealIds = new Set(
+      mapped
+        .filter((row) => row.needsReview && (row.estimatedProfit ?? Number.NEGATIVE_INFINITY) > 0)
+        .sort((a, b) => (b.estimatedProfit ?? Number.NEGATIVE_INFINITY) - (a.estimatedProfit ?? Number.NEGATIVE_INFINITY) || (b.aiConfidence ?? 0) - (a.aiConfidence ?? 0) || b.createdAt.localeCompare(a.createdAt))
+        .slice(0, 25)
+        .map((row) => row.id),
+    );
+
+    visibleResults = mapped
+      .filter((row) => !row.needsReview || surfacedReviewDealIds.has(row.id))
+      .sort((a, b) => {
+        const left = (a.estimatedProfit ?? Number.NEGATIVE_INFINITY);
+        const right = (b.estimatedProfit ?? Number.NEGATIVE_INFINITY);
+        if (left !== right) return right - left;
+        const confA = a.aiConfidence ?? 0;
+        const confB = b.aiConfidence ?? 0;
+        if (confA !== confB) return confB - confA;
+        return b.createdAt.localeCompare(a.createdAt);
+      })
+      .slice(0, 50);
+
     needsReviewResults = mapped
-      .filter((row) => row.needsReview && (row.estimatedProfit ?? Number.NEGATIVE_INFINITY) > 0)
+      .filter((row) => row.needsReview && !surfacedReviewDealIds.has(row.id) && (row.estimatedProfit ?? Number.NEGATIVE_INFINITY) > 0)
       .sort((a, b) => (b.estimatedProfit ?? Number.NEGATIVE_INFINITY) - (a.estimatedProfit ?? Number.NEGATIVE_INFINITY) || (b.aiConfidence ?? 0) - (a.aiConfidence ?? 0) || b.createdAt.localeCompare(a.createdAt))
       .slice(0, 20);
 
