@@ -1,7 +1,7 @@
 'use client';
 
 import type { Disposition, ReviewOption, ScanResultRow } from '@/types/app';
-import { determineGradingLane, formatRelativeTime, scoreDealOpportunity, summarizeDealReasons, toCurrency, toPct } from '@/lib/utils';
+import { determineGradingLane, formatConfidencePct, formatRelativeTime, scoreDealOpportunity, summarizeDealReasons, toCurrency, toPct } from '@/lib/utils';
 
 export function NeedsReviewBoard({
   rows,
@@ -61,7 +61,7 @@ export function NeedsReviewBoard({
                     {row.imageUrl ? <img className="review-image" src={row.imageUrl} alt={row.ebayTitle} /> : <div className="review-image review-placeholder">No image</div>}
                     <div className="stack" style={{ gap: 10 }}>
                       <div className="row-actions">
-                        <span className="badge">AI {row.aiConfidence ? `${row.aiConfidence}%` : '—'}</span>
+                        <span className="badge">AI {formatConfidencePct(row.aiConfidence)}</span>
                         <span className="badge">Deal Score {score}</span>
                         {row.auctionEndsAt ? <span className="badge">{formatRelativeTime(row.auctionEndsAt)}</span> : null}
                       </div>
@@ -142,7 +142,7 @@ export function NeedsReviewBoard({
                           <div className="row-actions" style={{ gap: 6, justifyContent: 'flex-end' }}>
                             {option.aiPreferred ? <span className="badge">AI shortlist</span> : null}
                             {option.candidateSource ? <span className="badge">{option.candidateSource}</span> : null}
-                            {option.confidence !== null ? <span className="badge">AI {option.confidence}%</span> : null}
+                            {option.confidence !== null ? <span className="badge">AI {formatConfidencePct(option.confidence)}</span> : null}
                           </div>
                         </div>
                         <div className="grid grid-2" style={{ gap: 10 }}>

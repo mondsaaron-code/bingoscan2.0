@@ -328,6 +328,16 @@ export function scoreSellerListingQuality(args: {
   };
 }
 
+export function normalizeConfidencePct(value: number | null | undefined): number | null {
+  if (value === null || value === undefined || !Number.isFinite(value)) return null;
+  return Math.max(0, Math.min(100, value <= 1 ? value * 100 : value));
+}
+
+export function formatConfidencePct(value: number | null | undefined): string {
+  const normalized = normalizeConfidencePct(value);
+  return normalized === null ? '—' : `${Math.round(normalized)}%`;
+}
+
 export function determineGradingLane(args: {
   totalPurchasePrice: number;
   scpUngradedSell?: number | null;
@@ -428,7 +438,7 @@ export function scoreDealOpportunity(args: {
   let score = 0;
   const profit = args.estimatedProfit ?? null;
   const margin = args.estimatedMarginPct ?? null;
-  const confidence = args.aiConfidence ?? null;
+  const confidence = normalizeConfidencePct(args.aiConfidence);
   const grade9Upside = args.scpGrade9 !== null && args.scpGrade9 !== undefined ? args.scpGrade9 - args.totalPurchasePrice : null;
   const psa10Upside = args.scpPsa10 !== null && args.scpPsa10 !== undefined ? args.scpPsa10 - args.totalPurchasePrice : null;
   const gradingLane = determineGradingLane({
@@ -544,7 +554,7 @@ export function summarizeDealReasons(args: {
   const parts: string[] = [];
   const profit = args.estimatedProfit ?? null;
   const margin = args.estimatedMarginPct ?? null;
-  const confidence = args.aiConfidence ?? null;
+  const confidence = normalizeConfidencePct(args.aiConfidence);
   const grade9Upside = args.scpGrade9 !== null && args.scpGrade9 !== undefined ? args.scpGrade9 - args.totalPurchasePrice : null;
   const psa10Upside = args.scpPsa10 !== null && args.scpPsa10 !== undefined ? args.scpPsa10 - args.totalPurchasePrice : null;
   const gradingLane = determineGradingLane({

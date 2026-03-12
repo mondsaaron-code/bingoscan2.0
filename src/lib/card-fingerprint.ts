@@ -37,6 +37,8 @@ const PARALLEL_TERMS = [
   'red wave',
   'blue wave',
   'green wave',
+  'red white blue',
+  'red white & blue',
   'blue hyper',
   'green hyper',
   'hyper prizm',
@@ -51,6 +53,8 @@ const PARALLEL_TERMS = [
   'pink optic preview',
   'optic preview pink',
   'orange scope',
+  'blue scope',
+  'red scope',
   'silver prizm',
   'green prizm',
   'orange prizm',
@@ -69,6 +73,11 @@ const PARALLEL_TERMS = [
   'xfractor',
   'atomic',
   'speckle',
+  'sonar',
+  'sonar refractor',
+  'aqua sonar',
+  'aqua sonar refractor',
+  'disco',
   'pink',
   'purple',
   'orange',
@@ -198,6 +207,15 @@ export function scoreFingerprintSimilarity(listingFingerprint: CardFingerprint, 
   return compareFingerprintMatch(listingFingerprint, candidateFingerprint).score;
 }
 
+export function listingContainsCandidatePlayer(listingText: string, candidateProductName: string): boolean {
+  const candidateTokens = tokenizePersonName(extractLeadingPlayerName(candidateProductName));
+  if (candidateTokens.length === 0) return true;
+  const normalizedListing = compactWhitespace(listingText).toLowerCase();
+  const matched = candidateTokens.filter((token) => listingContainsToken(normalizedListing, token)).length;
+  if (candidateTokens.length >= 2) return matched >= candidateTokens.length;
+  return matched >= 1;
+}
+
 export function normalizeFamilyKey(value: string | null | undefined): string | null {
   if (!value) return null;
   const normalized = compactWhitespace(String(value)).toLowerCase();
@@ -237,6 +255,20 @@ export function compareFingerprintMatch(listingFingerprint: CardFingerprint, can
     } else {
       score -= 14;
       negativeSignals.push(`Card # mismatch (${listingFingerprint.cardNumber} vs ${candidateFingerprint.cardNumber})`);
+    }
+  }
+  const candidatePlayerTokens = tokenizePersonName(candidateFingerprint.playerName);
+  if (candidatePlayerTokens.length > 0) {
+    const matchedPlayerTokens = candidatePlayerTokens.filter((token) => listingContainsToken(listingFingerprint.normalizedText, token)).length;
+    if (matchedPlayerTokens === candidatePlayerTokens.length) {
+      score += Math.min(12, 4 + (candidatePlayerTokens.length * 3));
+      positiveSignals.push(`Player ${candidateFingerprint.playerName ?? candidatePlayerTokens.join(' ')}`);
+    } else if (candidatePlayerTokens.length >= 2 && matchedPlayerTokens === 0) {
+      score -= 18;
+      negativeSignals.push(`Player mismatch (${candidateFingerprint.playerName ?? candidatePlayerTokens.join(' ')})`);
+    } else if (candidatePlayerTokens.length >= 2 && matchedPlayerTokens < candidatePlayerTokens.length) {
+      score -= 8;
+      negativeSignals.push(`Player evidence was incomplete for ${candidateFingerprint.playerName ?? candidatePlayerTokens.join(' ')}`);
     }
   }
   if (listingFingerprint.parallel && candidateFingerprint.parallel) {
@@ -328,12 +360,13 @@ function buildFingerprintFromText(
   text: string,
   options: { aspectMap: FingerprintAspectMap; condition: string | null },
 ): CardFingerprint {
-  const normalizedText = compactWhitespace(text).toLowerCase();
+  const compactText = compactWhitespace(text);
+  const normalizedText = compactText.toLowerCase();
   const tokens = tokenizeLoose(normalizedText).slice(0, 48);
   const year = extractYear(normalizedText);
   const aspectMap = options.aspectMap ?? {};
 
-  const playerName = firstAspectValue(aspectMap, ['player athlete', 'athlete', 'player']) ?? null;
+  const playerName = firstAspectValue(aspectMap, ['player athlete', 'athlete', 'player']) ?? extractLeadingPlayerName(compactText);
   const team = firstAspectValue(aspectMap, ['team', 'professional sports authen']) ?? null;
   const brand = normalizeBrandValue(extractBestTerm(normalizedText, BRAND_TERMS) ?? firstAspectValue(aspectMap, ['manufacturer', 'brand']));
   const setName = firstAspectValue(aspectMap, ['set', 'insert set']) ?? extractBestTerm(normalizedText, SET_HINTS);
@@ -444,11 +477,14 @@ function normalizeParallelValue(value: string | null | undefined): string | null
     [/\bpink mosaic(?: prizm)?\b/, 'pink mosaic'],
     [/\bgreen hyper(?: prizm)?\b/, 'green hyper'],
     [/\bblue hyper(?: prizm)?\b/, 'blue hyper'],
+    [/\bred white(?: &)? blue(?: prizm)?\b/, 'red white blue'],
     [/\bblue wave(?: prizm)?\b/, 'blue wave'],
     [/\bred wave(?: prizm)?\b/, 'red wave'],
     [/\bgreen wave(?: prizm)?\b/, 'green wave'],
     [/\bpurple shock(?: prizm)?\b/, 'purple shock'],
     [/\borange scope(?: prizm)?\b/, 'orange scope'],
+    [/\bblue scope(?: prizm)?\b/, 'blue scope'],
+    [/\bred scope(?: prizm)?\b/, 'red scope'],
     [/\bsilver(?: holo)?(?: prizm)?\b/, 'silver'],
     [/\borange(?: holo)?(?: prizm)?\b/, 'orange'],
     [/\bblue(?: holo)?(?: prizm)?\b/, 'blue'],
@@ -457,6 +493,12 @@ function normalizeParallelValue(value: string | null | undefined): string | null
     [/\bpurple(?: holo)?(?: prizm)?\b/, 'purple'],
     [/\bgreen(?: holo)?(?: prizm)?\b/, 'green'],
     [/\bgold(?: holo)?(?: prizm)?\b/, 'gold'],
+    [/\baqua sonar(?: refractor)?\b/, 'aqua sonar'],
+    [/\bsonar refractor\b/, 'sonar'],
+    [/\bsonar\b/, 'sonar'],
+    [/\bdisco(?: prizm)?\b/, 'disco'],
+    [/\bpulsar(?: prizm)?\b/, 'pulsar'],
+    [/\bshock(?: prizm)?\b/, 'shock'],
     [/\bholo(?: prizm)?\b/, 'holo'],
   ];
 
@@ -465,6 +507,36 @@ function normalizeParallelValue(value: string | null | undefined): string | null
   }
 
   return normalized;
+}
+
+function extractLeadingPlayerName(text: string): string | null {
+  const head = compactWhitespace(text.split(/[\[#(]/)[0] ?? '');
+  if (!head) return null;
+  const stripped = head
+    .replace(/\b(19\d{2}|20\d{2})\b/g, ' ')
+    .replace(/[|,:;]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const tokens = tokenizePersonName(stripped);
+  if (tokens.length === 0) return null;
+  return tokens.slice(0, 3).map((token) => token.replace(/\b\w/g, (m) => m.toUpperCase())).join(' ');
+}
+
+function tokenizePersonName(value: string | null | undefined): string[] {
+  if (!value) return [];
+  return compactWhitespace(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9'\-.]+/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.replace(/^[#.-]+|[#.-]+$/g, ''))
+    .filter((token) => Boolean(token)
+      && !/^(19\d{2}|20\d{2}|rc|card|cards|rookie|auto|autograph|patch|relic|prizm|optic|mosaic|select|phoenix|donruss|panini|topps|bowman|football|basketball|baseball|hockey|numbered|parallel|insert|the|and|of|jr|sr|ii|iii|iv|v)$/i.test(token)
+      && /[a-z]/.test(token));
+}
+
+function listingContainsToken(text: string, token: string): boolean {
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`, 'i').test(text);
 }
 
 function extractBestTerm(text: string, terms: string[]): string | null {

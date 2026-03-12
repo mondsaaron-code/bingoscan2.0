@@ -158,9 +158,13 @@ export async function verifyCardMatchWithOpenAI(
 
   const parsed = JSON.parse(response.output_text) as Omit<MatchDecision, 'extractedAttributes'> & { extractedAttributes?: Record<string, string | null> };
 
+  const normalizedConfidence = Number.isFinite(parsed.confidence)
+    ? Math.max(0, Math.min(100, parsed.confidence <= 1 ? parsed.confidence * 100 : parsed.confidence))
+    : 0;
+
   return {
     exactMatch: parsed.exactMatch,
-    confidence: parsed.confidence,
+    confidence: normalizedConfidence,
     reasoning: parsed.reasoning,
     chosenProductId: parsed.chosenProductId,
     topThreeProductIds: parsed.topThreeProductIds ?? [],

@@ -1,8 +1,8 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { Fragment, useMemo, useState } from 'react';
 import type { Disposition, ReviewOption, ScanResultRow } from '@/types/app';
-import { determineGradingLane, formatRelativeTime, scoreDealOpportunity, summarizeDealReasons, toCurrency, toPct } from '@/lib/utils';
+import { determineGradingLane, formatConfidencePct, formatRelativeTime, scoreDealOpportunity, summarizeDealReasons, toCurrency, toPct } from '@/lib/utils';
 
 export function ResultsTable({
   title,
@@ -97,78 +97,110 @@ export function ResultsTable({
                 scpGrade9: row.scpGrade9,
                 scpPsa10: row.scpPsa10,
               });
+
               return (
-                <tr key={row.id}>
-                  <td>
-                    <input type="checkbox" checked={selectedIds.includes(row.id)} onChange={() => toggleSelection(row.id)} />
-                  </td>
-                  <td>{row.imageUrl ? <img className="table-image" src={row.imageUrl} alt={row.ebayTitle} /> : '—'}</td>
-                  <td>
-                    <div><a href={row.ebayUrl} target="_blank" rel="noreferrer">{row.ebayTitle}</a></div>
-                    <div className="small muted">Confidence: {row.aiConfidence ? `${row.aiConfidence}%` : '—'}</div>
-                    {row.needsReview ? <div className="small" style={{ color: '#f6d365', fontWeight: 600 }}>Review suggested — surfaced here because it still looks profitable.</div> : null}
-                    <div className="small muted">eBay total: {toCurrency(row.purchasePrice)} + {toCurrency(row.shippingPrice)} shipping = {toCurrency(row.totalPurchasePrice)}</div>
-                    {row.sellerUsername ? <div className="small muted">Seller: {row.sellerUsername}{row.listingQualityScore !== null ? ` · Listing ${Math.round(row.listingQualityScore)}/100` : ''}</div> : null}
-                    <div className="small" style={{ color: '#d8e1f0', marginTop: 4 }}>
-                      Why it stands out: {summarizeDealReasons({
-                        estimatedProfit: row.estimatedProfit,
-                        estimatedMarginPct: row.estimatedMarginPct,
-                        aiConfidence: row.aiConfidence,
-                        scpUngradedSell: row.scpUngradedSell,
-                        scpGrade9: row.scpGrade9,
-                        scpPsa10: row.scpPsa10,
-                        totalPurchasePrice: row.totalPurchasePrice,
-                        auctionEndsAt: row.auctionEndsAt,
-                        needsReview: row.needsReview,
-                      }) || 'No strong edge yet'}
-                    </div>
-                    <div className="small muted" style={{ marginTop: 4 }}>Grade lane: {gradingLane.label} — {gradingLane.detail}</div>
-                    {row.reasoning ? <div className="small muted" style={{ marginTop: 4 }}>{row.reasoning}</div> : null}
-                    {row.needsReview && reviewOptions.length > 0 && onResolveReview ? (
-                      <div className="stack" style={{ marginTop: 10 }}>
-                        {reviewOptions.map((option) => (
-                          <div key={option.id} className="notice">
-                            <div><strong>Option {option.rank}:</strong> {option.scpProductName}</div>
-                            <div className="small muted">
-                              Ungraded {toCurrency(option.scpUngradedSell)} · Grade 9 {toCurrency(option.scpGrade9)} · PSA 10 {toCurrency(option.scpPsa10)}
-                            </div>
-                            <div className="row-actions" style={{ marginTop: 8 }}>
-                              <button className="btn btn-primary" onClick={() => onResolveReview(row.id, option.id)}>{option.scpUngradedSell !== null && option.scpUngradedSell - row.totalPurchasePrice <= 0 ? 'Use this match & hide' : 'Use this match'}</button>
-                              {option.scpLink ? <a href={option.scpLink} target="_blank" rel="noreferrer">Open SCP</a> : null}
-                            </div>
-                          </div>
-                        ))}
+                <Fragment key={row.id}>
+                  <tr>
+                    <td>
+                      <input type="checkbox" checked={selectedIds.includes(row.id)} onChange={() => toggleSelection(row.id)} />
+                    </td>
+                    <td>{row.imageUrl ? <img className="table-image" src={row.imageUrl} alt={row.ebayTitle} /> : '—'}</td>
+                    <td>
+                      <div><a href={row.ebayUrl} target="_blank" rel="noreferrer">{row.ebayTitle}</a></div>
+                      <div className="small muted">Confidence: {formatConfidencePct(row.aiConfidence)}</div>
+                      {row.needsReview ? <div className="small" style={{ color: '#f6d365', fontWeight: 600 }}>Review suggested — surfaced here because it still looks profitable.</div> : null}
+                      <div className="small muted">eBay total: {toCurrency(row.purchasePrice)} + {toCurrency(row.shippingPrice)} shipping = {toCurrency(row.totalPurchasePrice)}</div>
+                      {row.sellerUsername ? <div className="small muted">Seller: {row.sellerUsername}{row.listingQualityScore !== null ? ` · Listing ${Math.round(row.listingQualityScore)}/100` : ''}</div> : null}
+                      <div className="small" style={{ color: '#d8e1f0', marginTop: 4 }}>
+                        Why it stands out: {summarizeDealReasons({
+                          estimatedProfit: row.estimatedProfit,
+                          estimatedMarginPct: row.estimatedMarginPct,
+                          aiConfidence: row.aiConfidence,
+                          scpUngradedSell: row.scpUngradedSell,
+                          scpGrade9: row.scpGrade9,
+                          scpPsa10: row.scpPsa10,
+                          totalPurchasePrice: row.totalPurchasePrice,
+                          auctionEndsAt: row.auctionEndsAt,
+                          needsReview: row.needsReview,
+                        }) || 'No strong edge yet'}
                       </div>
-                    ) : null}
-                  </td>
-                  <td><span className="badge">{dealScore}</span></td>
-                  <td>
-                    <div>{toCurrency(row.totalPurchasePrice)}</div>
-                    <div className="small muted">{toCurrency(row.purchasePrice)} + {toCurrency(row.shippingPrice)} ship</div>
-                  </td>
-                  <td>{toCurrency(row.estimatedProfit)}</td>
-                  <td>{toCurrency(row.scpUngradedSell)}</td>
-                  <td>{toCurrency(row.scpGrade9)}</td>
-                  <td>{toCurrency(row.scpPsa10)}</td>
-                  <td>{row.scpLink ? <a href={row.scpLink} target="_blank" rel="noreferrer">Open SCP</a> : '—'}</td>
-                  <td>{new Date(row.createdAt).toLocaleString()}</td>
-                  <td>
-                    {row.auctionEndsAt ? (
-                      <>
-                        <div>{formatRelativeTime(row.auctionEndsAt)}</div>
-                        <div className="small muted">{new Date(row.auctionEndsAt).toLocaleString()}</div>
-                      </>
-                    ) : '—'}
-                  </td>
-                  <td>{toPct(row.estimatedMarginPct)}</td>
-                  <td>
-                    <div className="row-actions">
-                      <button className="btn" onClick={() => onDisposition([row.id], 'purchased')}>Purchased</button>
-                      <button className="btn" onClick={() => onDisposition([row.id], 'suppress_90_days')}>Suppress</button>
-                      <button className="btn btn-danger" onClick={() => onDisposition([row.id], 'bad_logic')}>Bad Logic</button>
-                    </div>
-                  </td>
-                </tr>
+                      <div className="small muted" style={{ marginTop: 4 }}>Grade lane: {gradingLane.label} — {gradingLane.detail}</div>
+                      {row.reasoning ? <div className="small muted" style={{ marginTop: 4 }}>{row.reasoning}</div> : null}
+                    </td>
+                    <td><span className="badge">{dealScore}</span></td>
+                    <td>
+                      <div>{toCurrency(row.totalPurchasePrice)}</div>
+                      <div className="small muted">{toCurrency(row.purchasePrice)} + {toCurrency(row.shippingPrice)} ship</div>
+                    </td>
+                    <td>{toCurrency(row.estimatedProfit)}</td>
+                    <td>{toCurrency(row.scpUngradedSell)}</td>
+                    <td>{toCurrency(row.scpGrade9)}</td>
+                    <td>{toCurrency(row.scpPsa10)}</td>
+                    <td>{row.scpLink ? <a href={row.scpLink} target="_blank" rel="noreferrer">Open SCP</a> : '—'}</td>
+                    <td>{new Date(row.createdAt).toLocaleString()}</td>
+                    <td>
+                      {row.auctionEndsAt ? (
+                        <>
+                          <div>{formatRelativeTime(row.auctionEndsAt)}</div>
+                          <div className="small muted">{new Date(row.auctionEndsAt).toLocaleString()}</div>
+                        </>
+                      ) : '—'}
+                    </td>
+                    <td>{toPct(row.estimatedMarginPct)}</td>
+                    <td>
+                      <div className="row-actions">
+                        <button className="btn" onClick={() => onDisposition([row.id], 'purchased')}>Purchased</button>
+                        <button className="btn" onClick={() => onDisposition([row.id], 'suppress_90_days')}>Suppress</button>
+                        <button className="btn btn-danger" onClick={() => onDisposition([row.id], 'bad_logic')}>Bad Logic</button>
+                      </div>
+                    </td>
+                  </tr>
+                  {row.needsReview && reviewOptions.length > 0 && onResolveReview ? (
+                    <tr>
+                      <td colSpan={14}>
+                        <div className="deals-options-grid">
+                          {reviewOptions.map((option) => (
+                            <div key={option.id} className="card card-pad stack review-option-card">
+                              <div className="spread" style={{ alignItems: 'flex-start' }}>
+                                <div>
+                                  <div className="small muted">Option {option.rank}</div>
+                                  <div style={{ fontWeight: 700, lineHeight: 1.35 }}>{option.scpProductName}</div>
+                                </div>
+                                <div className="row-actions" style={{ gap: 6, justifyContent: 'flex-end' }}>
+                                  {option.aiPreferred ? <span className="badge">AI shortlist</span> : null}
+                                  {option.candidateSource ? <span className="badge">{option.candidateSource}</span> : null}
+                                  {option.confidence !== null ? <span className="badge">AI {formatConfidencePct(option.confidence)}</span> : null}
+                                </div>
+                              </div>
+                              <div className="grid grid-2" style={{ gap: 10 }}>
+                                <div className="kpi">
+                                  <div className="small muted">Ungraded</div>
+                                  <div className="kpi-value" style={{ fontSize: '1rem' }}>{toCurrency(option.scpUngradedSell)}</div>
+                                </div>
+                                <div className="kpi">
+                                  <div className="small muted">Profit</div>
+                                  <div className="kpi-value" style={{ fontSize: '1rem' }}>{toCurrency(option.scpUngradedSell !== null ? option.scpUngradedSell - row.totalPurchasePrice : null)}</div>
+                                </div>
+                                <div className="kpi">
+                                  <div className="small muted">Grade 9</div>
+                                  <div className="kpi-value" style={{ fontSize: '1rem' }}>{toCurrency(option.scpGrade9)}</div>
+                                </div>
+                                <div className="kpi">
+                                  <div className="small muted">PSA 10</div>
+                                  <div className="kpi-value" style={{ fontSize: '1rem' }}>{toCurrency(option.scpPsa10)}</div>
+                                </div>
+                              </div>
+                              <div className="row-actions">
+                                <button className="btn btn-primary" onClick={() => onResolveReview(row.id, option.id)}>{option.scpUngradedSell !== null && option.scpUngradedSell - row.totalPurchasePrice <= 0 ? 'Use this match & hide' : 'Use this match'}</button>
+                                {option.scpLink ? <a href={option.scpLink} target="_blank" rel="noreferrer">Open SCP</a> : null}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </td>
+                    </tr>
+                  ) : null}
+                </Fragment>
               );
             })}
             {sortedRows.length === 0 ? (

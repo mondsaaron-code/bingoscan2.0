@@ -7,11 +7,6 @@ const BLOCK_WORDS = [
   'lots',
   'break',
   'case break',
-  'box',
-  'blaster',
-  'hanger',
-  'fat pack',
-  'repack',
   'team set',
   'mystery',
   'custom',
@@ -19,7 +14,6 @@ const BLOCK_WORDS = [
   'digital',
   'pokemon',
   'comic',
-  'sticker',
   'magazine',
   'wax',
   'bundle',
@@ -28,7 +22,31 @@ const BLOCK_WORDS = [
 ];
 
 const GRADED_WORDS = ['psa', 'bgs', 'sgc', 'cgc', 'beckett', 'gem mint', 'slab', 'graded'];
-const MULTI_CARD_PATTERNS = [/\blot\b/i, /\bpair\b/i, /\bset of\b/i, /\bteam set\b/i, /\bbundle\b/i, /\b2 card\b/i, /\b3 card\b/i, /\b4 card\b/i, /\bx2\b/i];
+const MULTI_CARD_PATTERNS = [
+  /\blot\b/i,
+  /\bpair\b/i,
+  /\bset of\b/i,
+  /\bteam set\b/i,
+  /\bbundle\b/i,
+  /\b2 card\b/i,
+  /\b3 card\b/i,
+  /\b4 card\b/i,
+  /\b5 card\b/i,
+  /\bmultiple cards?\b/i,
+  /\bx2\b/i,
+  /\bcomplete your set\b/i,
+  /\bcomplete the set\b/i,
+  /\bpick your card\b/i,
+  /\bchoose your card\b/i,
+  /\byou pick\b/i,
+  /\bu pick\b/i,
+  /\byour choice\b/i,
+  /\bpick one\b/i,
+  /\bfrom list\b/i,
+  /\bset builder\b/i,
+  /\b[A-Za-z][A-Za-z'.-]+\s*\/\s*[A-Za-z][A-Za-z'.-]+\b/i,
+  /(?:\b\d{1,4}\s*\/\s*\d{1,4}\b.*){2,}/i,
+];
 const SEALED_WAX_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\bfat\s+pack\b/i, reason: 'Blocked sealed-wax phrase: fat pack' },
   { pattern: /\bvalue\s+pack\b/i, reason: 'Blocked sealed-wax phrase: value pack' },
@@ -37,11 +55,21 @@ const SEALED_WAX_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   { pattern: /\bjumbo\s+pack\b/i, reason: 'Blocked sealed-wax phrase: jumbo pack' },
   { pattern: /\bcello\s+pack\b/i, reason: 'Blocked sealed-wax phrase: cello pack' },
   { pattern: /\bbooster\s+pack\b/i, reason: 'Blocked sealed-wax phrase: booster pack' },
+  { pattern: /\bblaster\s+box\b/i, reason: 'Blocked sealed-wax phrase: blaster box' },
+  { pattern: /\bhobby\s+box\b/i, reason: 'Blocked sealed-wax phrase: hobby box' },
+  { pattern: /\bretail\s+box\b/i, reason: 'Blocked sealed-wax phrase: retail box' },
+  { pattern: /\bmega\s+box\b/i, reason: 'Blocked sealed-wax phrase: mega box' },
+  { pattern: /\bbooster\s+box\b/i, reason: 'Blocked sealed-wax phrase: booster box' },
+  { pattern: /\bfactory\s+sealed\s+box\b/i, reason: 'Blocked sealed-wax phrase: factory sealed box' },
+  { pattern: /\bbox\s+break\b/i, reason: 'Blocked sealed-wax phrase: box break' },
   { pattern: /\brepack\b/i, reason: 'Blocked phrase: repack' },
 ];
 
 const RAW_CONDITION_PATTERNS = [/\bungraded\b/i, /\braw\b/i, /\bnot graded\b/i];
 const GRADED_CONDITION_PATTERNS = [/\bpsa\b/i, /\bbgs\b/i, /\bsgc\b/i, /\bcgc\b/i, /\bbeckett\b/i, /\bgem mint\b/i, /\bslab(?:bed)?\b/i, /\bgraded\b/i];
+const APPAREL_CONTEXT_PATTERN = /\b(?:shirt|t-?shirt|tee|jersey|hoodie|pullover|jacket|hat|cap)\b/i;
+const APPAREL_SIZE_PATTERN = /\b(?:mens?|women'?s|youth|kids?|size|small|medium|large|xl|xxl|xxxl|nike|adidas|reebok|fanatics)\b/i;
+const STICKER_NON_CARD_PATTERN = /\b(?:bumper|window|helmet|vinyl|decal|logo)\s+sticker\b/i;
 
 type AspectRule = {
   filterValue: string | undefined;
@@ -82,8 +110,12 @@ function rejectFromText(text: string, filters: SearchForm): string | null {
     }
   }
 
-  if (!filters.memorabilia && /\bjersey\b|\bshirt\b/i.test(text)) {
+  if (!filters.memorabilia && shouldRejectApparel(text)) {
     return 'Blocked phrase: jersey or shirt';
+  }
+
+  if (STICKER_NON_CARD_PATTERN.test(text)) {
+    return 'Blocked phrase: sticker';
   }
 
   if (filters.sport.trim().toLowerCase() === 'football' && /\bsoccer\b|\bfutbol\b|\buefa\b|\bfifa\b|\bpremier league\b/i.test(text)) {
@@ -205,6 +237,12 @@ function rejectFromAspects(aspectMap: Record<string, string[]>, filters: SearchF
   return null;
 }
 
+function shouldRejectApparel(text: string): boolean {
+  if (/\bjersey number\b/i.test(text)) return false;
+  if (!APPAREL_CONTEXT_PATTERN.test(text)) return false;
+  return APPAREL_SIZE_PATTERN.test(text);
+}
+
 function normalizeFilterValue(value: string | null | undefined): string {
   return (value ?? '').toLowerCase().replace(/[^a-z0-9#]+/g, ' ').replace(/\s+/g, ' ').trim();
 }
@@ -268,7 +306,6 @@ export function buildNegativeClauses(filters: SearchForm): string[] {
   const negatives = [
     'lot',
     'lots',
-    'box',
     'break',
     'reprint',
     'custom',
@@ -278,6 +315,14 @@ export function buildNegativeClauses(filters: SearchForm): string[] {
     'bundle',
     'complete set',
     'starter set',
+    'complete your set',
+    'complete the set',
+    'pick your card',
+    'choose your card',
+    'you pick',
+    'u pick',
+    'your choice',
+    'set builder',
   ];
 
   const sport = filters.sport.trim().toLowerCase();
@@ -285,10 +330,10 @@ export function buildNegativeClauses(filters: SearchForm): string[] {
     negatives.push('soccer', 'futbol', 'uefa', 'fifa', 'premier league', 'women', 'womens', 'european');
   }
 
-  negatives.push('fat pack', 'value pack', 'retail pack', 'hobby pack', 'jumbo pack', 'cello pack', 'booster pack', 'repack');
+  negatives.push('fat pack', 'value pack', 'retail pack', 'hobby pack', 'jumbo pack', 'cello pack', 'booster pack', 'blaster box', 'hobby box', 'retail box', 'mega box', 'booster box', 'repack');
 
   if (!filters.memorabilia) {
-    negatives.push('jersey', 'shirt');
+    negatives.push('shirt', 'hoodie', 't-shirt', 'tee');
   }
 
   if (filters.conditionMode === 'raw') {

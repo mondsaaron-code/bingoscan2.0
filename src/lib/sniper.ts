@@ -5,6 +5,7 @@ import {
   buildListingFingerprint,
   buildScpCandidateFingerprint,
   compareFingerprintMatch,
+  listingContainsCandidatePlayer,
   normalizeFamilyKey,
   type CardFingerprint,
 } from '@/lib/card-fingerprint';
@@ -112,6 +113,7 @@ export function filterCandidatesForSniperLane(args: {
     if (profile.requiredYear && candidateFingerprint.year && candidateFingerprint.year !== profile.requiredYear) hardReasons.push('year mismatch');
     if (profile.familyKey && candidateFingerprint.familyKey && candidateFingerprint.familyKey !== profile.familyKey) hardReasons.push('set-family mismatch');
     if (listingFingerprint.cardNumber && candidateFingerprint.cardNumber && candidateFingerprint.cardNumber !== listingFingerprint.cardNumber) hardReasons.push('card-number mismatch');
+    if (!listingContainsCandidatePlayer(args.listing.title, candidate.productName)) hardReasons.push('player mismatch');
     if (listingFingerprint.parallel && candidateFingerprint.parallel && listingFingerprint.parallel !== candidateFingerprint.parallel) hardReasons.push('parallel mismatch');
     if (profile.requireNumbered && candidateFingerprint.serialNumbered === false) hardReasons.push('unnumbered SCP candidate');
     if (listingFingerprint.cardNumber && !candidateFingerprint.cardNumber && comparison.score < 30) hardReasons.push('missing card number on weak candidate');
@@ -156,6 +158,9 @@ export function candidateClearsSniperDealGate(args: {
   if (args.listingFingerprint.parallel && candidateFingerprint.parallel && args.listingFingerprint.parallel !== candidateFingerprint.parallel) {
     return { ok: false, reason: 'Displayed SCP match failed the sniper parallel gate.', score: comparison.score, positiveSignals: comparison.positiveSignals, negativeSignals: comparison.negativeSignals };
   }
+  if (!listingContainsCandidatePlayer(args.listingFingerprint.normalizedText, args.candidate.productName)) {
+    return { ok: false, reason: 'Displayed SCP match failed the sniper player-name gate.', score: comparison.score, positiveSignals: comparison.positiveSignals, negativeSignals: comparison.negativeSignals };
+  }
   if (comparison.score < 34 || comparison.positiveSignals.length < 3) {
     return { ok: false, reason: 'Displayed SCP match failed the sniper confidence gate.', score: comparison.score, positiveSignals: comparison.positiveSignals, negativeSignals: comparison.negativeSignals };
   }
@@ -176,5 +181,6 @@ export function candidateIsPlausibleSniperReview(args: {
   if (profile.requiredYear && candidateFingerprint.year && candidateFingerprint.year !== profile.requiredYear) return false;
   if (args.listingFingerprint.cardNumber && candidateFingerprint.cardNumber && args.listingFingerprint.cardNumber !== candidateFingerprint.cardNumber) return false;
   if (args.listingFingerprint.parallel && candidateFingerprint.parallel && args.listingFingerprint.parallel !== candidateFingerprint.parallel) return false;
+  if (!listingContainsCandidatePlayer(args.listingFingerprint.normalizedText, args.candidate.productName)) return false;
   return comparison.score >= 24 || comparison.positiveSignals.length >= 3;
 }

@@ -68,3 +68,8 @@ img.table-image { width: 64px; height: 88px; object-fit: cover; border-radius: 1
   .review-image { width: 100%; height: auto; max-height: 320px; }
   .review-options-grid { grid-template-columns: 1fr; }
 }
+
+.deals-options-grid { display: grid; grid-template-columns: repeat(3, minmax(240px, 1fr)); gap: 16px; }
+@media (max-width: 1080px) {
+  .deals-options-grid { grid-template-columns: 1fr; }
+}
