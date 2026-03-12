@@ -224,7 +224,7 @@ function normalizeScpCacheAlias(value: string): string {
 }
 
 function extractYearToken(value: string): string | null {
-  return value.match(/(19|20)\d{2}/)?.[0] ?? null;
+  return value.match(/\b(19|20)\d{2}\b/)?.[0] ?? null;
 }
 
 function countSharedTokens(left: string, right: string): number {

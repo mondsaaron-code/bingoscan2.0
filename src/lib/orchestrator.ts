@@ -699,7 +699,7 @@ ${sniperCandidateFilter.reasons.join(' • ')}` : ''}`,
       })
     : { ok: false, reason: 'No sniper SCP candidate selected.', score: 0, positiveSignals: [], negativeSignals: [] };
   const cardNumberThresholdAdjustment = (chosenCardNumberSignal?.score ?? 0) <= -8 ? 4 : (chosenCardNumberSignal?.score ?? 0) >= 8 ? -2 : 0;
-  const autoAcceptThreshold = Math.max(84, Math.min(94, AUTO_ACCEPT_CONFIDENCE + cardNumberThresholdAdjustment));
+  const autoAcceptThreshold = Math.max(82, Math.min(92, AUTO_ACCEPT_CONFIDENCE + cardNumberThresholdAdjustment));
   const autoAcceptHeuristic = deriveAutoAcceptHeuristic({
     decision,
     comparison: chosenComparison,
@@ -707,7 +707,7 @@ ${sniperCandidateFilter.reasons.join(' • ')}` : ''}`,
     cardNumberMemoryScore: chosenCardNumberSignal?.score ?? 0,
     listingQualityScore: listingQuality?.score ?? null,
   });
-  const effectiveAutoAcceptThreshold = Math.max(80, autoAcceptThreshold - autoAcceptHeuristic.thresholdReduction);
+  const effectiveAutoAcceptThreshold = Math.max(74, autoAcceptThreshold - autoAcceptHeuristic.thresholdReduction);
   const treatAsExactMatch = decision.exactMatch || autoAcceptHeuristic.treatAsExact;
 
   if (!treatAsExactMatch || decision.confidence < effectiveAutoAcceptThreshold || !chosen || (sniperProfile.active && !sniperChosenGate.ok)) {
@@ -1048,31 +1048,31 @@ function deriveAutoAcceptHeuristic(args: {
   const strongPositiveSignals = comparison.positiveSignals.length;
   const listingQualityScore = args.listingQualityScore ?? 0;
 
-  if (comparison.score >= 46 && hardMismatches === 0 && args.decision.confidence >= 72 && strongPositiveSignals >= 3) {
+  if (comparison.score >= 42 && hardMismatches === 0 && args.decision.confidence >= 60 && strongPositiveSignals >= 3) {
     return {
       treatAsExact: true,
-      thresholdReduction: 12,
+      thresholdReduction: 16,
       reason: 'Strong fingerprint alignment let the listing skip manual review.',
     };
   }
 
   if (
-    comparison.score >= 38
+    comparison.score >= 34
     && hardMismatches === 0
-    && args.decision.confidence >= 78
+    && args.decision.confidence >= 68
     && (args.reviewMemoryScore >= 5 || args.cardNumberMemoryScore >= 5 || listingQualityScore >= 70)
   ) {
     return {
       treatAsExact: true,
-      thresholdReduction: 8,
+      thresholdReduction: 12,
       reason: 'Strong fingerprint alignment plus learned history supported auto-accept.',
     };
   }
 
-  if (args.decision.exactMatch && comparison.score >= 30 && hardMismatches <= 1 && args.decision.confidence >= 84) {
+  if (args.decision.exactMatch && comparison.score >= 28 && hardMismatches <= 1 && args.decision.confidence >= 76) {
     return {
       treatAsExact: true,
-      thresholdReduction: 4,
+      thresholdReduction: 8,
       reason: 'OpenAI exact-match call was backed by a solid fingerprint comparison.',
     };
   }

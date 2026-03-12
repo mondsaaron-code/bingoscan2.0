@@ -11,7 +11,6 @@ const BLOCK_WORDS = [
   'blaster',
   'hanger',
   'fat pack',
-  'pack',
   'repack',
   'team set',
   'mystery',
@@ -30,6 +29,16 @@ const BLOCK_WORDS = [
 
 const GRADED_WORDS = ['psa', 'bgs', 'sgc', 'cgc', 'beckett', 'gem mint', 'slab', 'graded'];
 const MULTI_CARD_PATTERNS = [/\blot\b/i, /\bpair\b/i, /\bset of\b/i, /\bteam set\b/i, /\bbundle\b/i, /\b2 card\b/i, /\b3 card\b/i, /\b4 card\b/i, /\bx2\b/i];
+const SEALED_WAX_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
+  { pattern: /\bfat\s+pack\b/i, reason: 'Blocked sealed-wax phrase: fat pack' },
+  { pattern: /\bvalue\s+pack\b/i, reason: 'Blocked sealed-wax phrase: value pack' },
+  { pattern: /\bretail\s+pack\b/i, reason: 'Blocked sealed-wax phrase: retail pack' },
+  { pattern: /\bhobby\s+pack\b/i, reason: 'Blocked sealed-wax phrase: hobby pack' },
+  { pattern: /\bjumbo\s+pack\b/i, reason: 'Blocked sealed-wax phrase: jumbo pack' },
+  { pattern: /\bcello\s+pack\b/i, reason: 'Blocked sealed-wax phrase: cello pack' },
+  { pattern: /\bbooster\s+pack\b/i, reason: 'Blocked sealed-wax phrase: booster pack' },
+  { pattern: /\brepack\b/i, reason: 'Blocked phrase: repack' },
+];
 
 const RAW_CONDITION_PATTERNS = [/\bungraded\b/i, /\braw\b/i, /\bnot graded\b/i];
 const GRADED_CONDITION_PATTERNS = [/\bpsa\b/i, /\bbgs\b/i, /\bsgc\b/i, /\bcgc\b/i, /\bbeckett\b/i, /\bgem mint\b/i, /\bslab(?:bed)?\b/i, /\bgraded\b/i];
@@ -64,6 +73,12 @@ function rejectFromText(text: string, filters: SearchForm): string | null {
   for (const word of BLOCK_WORDS) {
     if (lower.includes(word)) {
       return `Blocked phrase: ${word}`;
+    }
+  }
+
+  for (const entry of SEALED_WAX_PATTERNS) {
+    if (entry.pattern.test(text)) {
+      return entry.reason;
     }
   }
 
@@ -254,7 +269,6 @@ export function buildNegativeClauses(filters: SearchForm): string[] {
     'lot',
     'lots',
     'box',
-    'pack',
     'break',
     'reprint',
     'custom',
@@ -270,6 +284,8 @@ export function buildNegativeClauses(filters: SearchForm): string[] {
   if (sport === 'football') {
     negatives.push('soccer', 'futbol', 'uefa', 'fifa', 'premier league', 'women', 'womens', 'european');
   }
+
+  negatives.push('fat pack', 'value pack', 'retail pack', 'hobby pack', 'jumbo pack', 'cello pack', 'booster pack', 'repack');
 
   if (!filters.memorabilia) {
     negatives.push('jersey', 'shirt');

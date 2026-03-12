@@ -32,12 +32,31 @@ const PARALLEL_TERMS = [
   'gold shimmer',
   'blue shimmer',
   'red shimmer',
+  'white shimmer',
   'orange pulsar',
   'red wave',
   'blue wave',
+  'green wave',
+  'blue hyper',
+  'green hyper',
   'hyper prizm',
+  'orange mosaic',
+  'green mosaic',
+  'pink mosaic',
+  'blue mosaic',
+  'reactive blue mosaic',
+  'reactive orange mosaic',
+  'purple shock',
+  'blue stars',
+  'pink optic preview',
+  'optic preview pink',
+  'orange scope',
   'silver prizm',
   'green prizm',
+  'orange prizm',
+  'blue prizm',
+  'pink prizm',
+  'red prizm',
   'mojo prizm',
   'choice red',
   'choice blue',
@@ -316,12 +335,12 @@ function buildFingerprintFromText(
 
   const playerName = firstAspectValue(aspectMap, ['player athlete', 'athlete', 'player']) ?? null;
   const team = firstAspectValue(aspectMap, ['team', 'professional sports authen']) ?? null;
-  const brand = extractBestTerm(normalizedText, BRAND_TERMS) ?? firstAspectValue(aspectMap, ['manufacturer', 'brand']);
+  const brand = normalizeBrandValue(extractBestTerm(normalizedText, BRAND_TERMS) ?? firstAspectValue(aspectMap, ['manufacturer', 'brand']));
   const setName = firstAspectValue(aspectMap, ['set', 'insert set']) ?? extractBestTerm(normalizedText, SET_HINTS);
   const familyKey = normalizeFamilyKey([brand, setName, normalizedText].filter(Boolean).join(' '));
-  const cardNumber = firstAspectValue(aspectMap, ['card number']) ?? extractCardNumber(normalizedText);
-  const parallel = firstAspectValue(aspectMap, ['parallel variety', 'parallel']) ?? extractBestTerm(normalizedText, PARALLEL_TERMS);
-  const serialNumberText = firstAspectValue(aspectMap, ['print run', 'serial number', 'serial numbered']) ?? extractSerialNumberText(normalizedText);
+  const cardNumber = normalizeCardNumber(firstAspectValue(aspectMap, ['card number'])) ?? extractCardNumber(normalizedText);
+  const parallel = normalizeParallelValue(firstAspectValue(aspectMap, ['parallel variety', 'parallel']) ?? extractBestTerm(normalizedText, PARALLEL_TERMS));
+  const serialNumberText = normalizeSerialNumberText(firstAspectValue(aspectMap, ['print run', 'serial number', 'serial numbered'])) ?? extractSerialNumberText(normalizedText);
   const serialNumberDenominator = extractSerialNumberDenominator(serialNumberText);
   const serialNumbered = serialNumberText ? true : inferBoolean(normalizedText, ['numbered', '/'], ['unnumbered']);
   const rookie = inferBoolean(normalizedText, ['rookie', 'rc'], ['non rookie']);
@@ -358,26 +377,94 @@ function buildFingerprintFromText(
 }
 
 function extractYear(text: string): string | null {
-  const match = text.match(/(19\d{2}|20\d{2})/);
+  const match = text.match(/\b(19\d{2}|20\d{2})\b/);
   return match?.[1] ?? null;
 }
 
+function normalizeCardNumber(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const match = compactWhitespace(value).match(/#?\s*([a-z0-9-]{1,14})/i);
+  return match?.[1]?.toUpperCase() ?? null;
+}
+
 function extractCardNumber(text: string): string | null {
-  const hashMatch = text.match(/(?:^|\s)#\s*([a-z0-9-]{1,10})(?=\s|$)/i);
+  const hashMatch = text.match(/(?:^|\s)#\s*([a-z0-9-]{1,14})(?=\s|$)/i);
   if (hashMatch?.[1]) return hashMatch[1].toUpperCase();
-  const numberMatch = text.match(/(?:card|no|number)\s*#?\s*([a-z0-9-]{1,10})/i);
-  return numberMatch?.[1]?.toUpperCase() ?? null;
+  const numberMatch = text.match(/\b(?:card|no|number)\s*#?\s*([a-z0-9-]{1,14})\b/i);
+  if (numberMatch?.[1]) return numberMatch[1].toUpperCase();
+  const insertStyleMatch = text.match(/\b([a-z]{2,5}-[a-z0-9]{2,8})\b/i);
+  return insertStyleMatch?.[1]?.toUpperCase() ?? null;
+}
+
+function normalizeSerialNumberText(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const match = compactWhitespace(value).match(/\b(\d{1,4})\s*\/\s*(\d{1,4})\b/);
+  return match ? `${match[1]}/${match[2]}` : null;
 }
 
 function extractSerialNumberText(text: string): string | null {
-  const match = text.match(/\d+\s*\/\s*\d+/);
-  return match ? match[0].replace(/\s+/g, '') : null;
+  const match = text.match(/\b(\d{1,4})\s*\/\s*(\d{1,4})\b/);
+  return match ? `${match[1]}/${match[2]}` : null;
 }
 
 function extractSerialNumberDenominator(value: string | null): string | null {
   if (!value) return null;
   const match = value.match(/\/(\d+)/);
   return match?.[1] ?? null;
+}
+
+function normalizeBrandValue(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const normalized = compactWhitespace(value).toLowerCase();
+  if (normalized.includes('donruss optic') || normalized.includes('panini optic')) return 'optic';
+  if (normalized.includes('panini donruss') || normalized === 'donruss') return 'donruss';
+  if (normalized.includes('panini prizm') || normalized === 'prizm') return 'prizm';
+  if (normalized.includes('panini mosaic') || normalized === 'mosaic') return 'mosaic';
+  if (normalized.includes('panini select') || normalized === 'select') return 'select';
+  if (normalized.includes('topps chrome')) return 'topps chrome';
+  if (normalized.includes('bowman chrome')) return 'bowman chrome';
+  return normalized;
+}
+
+function normalizeParallelValue(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const normalized = compactWhitespace(value)
+    .toLowerCase()
+    .replace(/prism/g, 'prizm')
+    .replace(/\s+/g, ' ');
+
+  const rules: Array<[RegExp, string]> = [
+    [/\boptic preview pink(?: prizm)?\b/, 'pink optic preview'],
+    [/\bpink optic preview(?: prizm)?\b/, 'pink optic preview'],
+    [/\breactive blue mosaic(?: prizm)?\b/, 'reactive blue mosaic'],
+    [/\breactive orange mosaic(?: prizm)?\b/, 'reactive orange mosaic'],
+    [/\borange mosaic(?: prizm)?\b/, 'orange mosaic'],
+    [/\bgreen mosaic(?: prizm)?\b/, 'green mosaic'],
+    [/\bblue mosaic(?: prizm)?\b/, 'blue mosaic'],
+    [/\bpink mosaic(?: prizm)?\b/, 'pink mosaic'],
+    [/\bgreen hyper(?: prizm)?\b/, 'green hyper'],
+    [/\bblue hyper(?: prizm)?\b/, 'blue hyper'],
+    [/\bblue wave(?: prizm)?\b/, 'blue wave'],
+    [/\bred wave(?: prizm)?\b/, 'red wave'],
+    [/\bgreen wave(?: prizm)?\b/, 'green wave'],
+    [/\bpurple shock(?: prizm)?\b/, 'purple shock'],
+    [/\borange scope(?: prizm)?\b/, 'orange scope'],
+    [/\bsilver(?: holo)?(?: prizm)?\b/, 'silver'],
+    [/\borange(?: holo)?(?: prizm)?\b/, 'orange'],
+    [/\bblue(?: holo)?(?: prizm)?\b/, 'blue'],
+    [/\bred(?: holo)?(?: prizm)?\b/, 'red'],
+    [/\bpink(?: holo)?(?: prizm)?\b/, 'pink'],
+    [/\bpurple(?: holo)?(?: prizm)?\b/, 'purple'],
+    [/\bgreen(?: holo)?(?: prizm)?\b/, 'green'],
+    [/\bgold(?: holo)?(?: prizm)?\b/, 'gold'],
+    [/\bholo(?: prizm)?\b/, 'holo'],
+  ];
+
+  for (const [pattern, canonical] of rules) {
+    if (pattern.test(normalized)) return canonical;
+  }
+
+  return normalized;
 }
 
 function extractBestTerm(text: string, terms: string[]): string | null {
