@@ -11,7 +11,35 @@ export type ScanStatus =
   | 'cancelled'
   | 'failed';
 
-export type Disposition = 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
+export type Disposition =
+  | 'purchased'
+  | 'suppress_90_days'
+  | 'bad_logic'
+  | 'not_profitable'
+  | 'not_enough_profit'
+  | 'bad_scp_options'
+  | 'does_not_match_query'
+  | 'multi_card_or_set_builder'
+  | 'wrong_player_or_wrong_card'
+  | 'parallel_or_variant_unclear'
+  | 'price_changed'
+  | 'already_reviewed_duplicate'
+  | 'non_card_or_memorabilia';
+
+export const DISPOSITION_OPTIONS: Array<{ value: Disposition; label: string; tone?: 'danger' | 'default' }> = [
+  { value: 'purchased', label: 'Purchased' },
+  { value: 'not_enough_profit', label: 'Not Enough Profit' },
+  { value: 'suppress_90_days', label: 'Suppress 90 Days' },
+  { value: 'bad_scp_options', label: 'Bad SCP Options', tone: 'danger' },
+  { value: 'does_not_match_query', label: 'Does Not Match Query', tone: 'danger' },
+  { value: 'wrong_player_or_wrong_card', label: 'Wrong Player/Card', tone: 'danger' },
+  { value: 'parallel_or_variant_unclear', label: 'Parallel Unclear' },
+  { value: 'multi_card_or_set_builder', label: 'Set Builder', tone: 'danger' },
+  { value: 'price_changed', label: 'Price Changed' },
+  { value: 'non_card_or_memorabilia', label: 'Non-Card/Memorabilia', tone: 'danger' },
+  { value: 'already_reviewed_duplicate', label: 'Already Reviewed' },
+  { value: 'bad_logic', label: 'Bad Logic', tone: 'danger' },
+];
 export type ProviderName = 'ebay' | 'scp' | 'openai' | 'ximilar';
 
 export type SearchForm = {

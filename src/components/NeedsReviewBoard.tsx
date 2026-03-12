@@ -1,6 +1,6 @@
 'use client';
 
-import type { Disposition, ReviewOption, ScanResultRow } from '@/types/app';
+import { DISPOSITION_OPTIONS, type Disposition, type ReviewOption, type ScanResultRow } from '@/types/app';
 import { determineGradingLane, formatConfidencePct, formatRelativeTime, scoreDealOpportunity, summarizeDealReasons, toCurrency, toPct } from '@/lib/utils';
 
 export function NeedsReviewBoard({
@@ -109,10 +109,10 @@ export function NeedsReviewBoard({
                       <div className="small muted">Current placeholder match: Ungraded {toCurrency(row.scpUngradedSell)} · Grade 9 {toCurrency(row.scpGrade9)} · PSA 10 {toCurrency(row.scpPsa10)}</div>
                       <div className="small muted">Grade lane: {gradingLane.label} — {gradingLane.detail}</div>
                       {row.reasoning ? <div className="notice"><div className="small"><strong>AI review note:</strong> {row.reasoning}</div></div> : null}
-                      <div className="row-actions">
-                        <button className="btn btn-ghost" onClick={() => onDisposition([row.id], 'suppress_90_days')}>Suppress 90 Days</button>
-                        <button className="btn btn-danger" onClick={() => onDisposition([row.id], 'bad_logic')}>Bad Logic</button>
-                        <button className="btn" onClick={() => onDisposition([row.id], 'purchased')}>Purchased</button>
+                      <div className="row-actions" style={{ flexWrap: 'wrap' }}>
+                        {DISPOSITION_OPTIONS.map((option) => (
+                          <button key={option.value} className={option.tone === 'danger' ? 'btn btn-danger' : option.value === 'purchased' ? 'btn' : 'btn btn-ghost'} onClick={() => onDisposition([row.id], option.value)}>{option.label}</button>
+                        ))}
                       </div>
                     </div>
                   </div>

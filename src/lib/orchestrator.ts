@@ -29,7 +29,7 @@ import {
   upsertDedupeItem,
 } from '@/lib/db';
 import { shouldRejectListingDetails, shouldRejectTitle } from '@/lib/filters';
-import { buildListingFingerprint, buildScpCandidateFingerprint, compareFingerprintMatch } from '@/lib/card-fingerprint';
+import { buildListingFingerprint, buildScpCandidateFingerprint, compareFingerprintMatch, listingContainsCandidatePlayer } from '@/lib/card-fingerprint';
 import { candidateClearsSniperDealGate, candidateIsPlausibleSniperReview, filterCandidatesForSniperLane, getSniperProfile, validateListingForSniperLane } from '@/lib/sniper';
 import { verifyCardMatchWithOpenAI } from '@/lib/openai';
 import {
@@ -107,6 +107,23 @@ type RankedCandidateRow = {
   reviewMemory: ReturnType<typeof scoreScpCandidateAgainstReviewMemory>;
   cardNumberMemory: ReturnType<typeof scoreScpCandidateAgainstCardNumberMemory>;
 };
+
+const SCP_NON_CARD_PATTERNS = [
+  /\bblaster box\b/i,
+  /\bhobby box\b/i,
+  /\bretail box\b/i,
+  /\bmega box\b/i,
+  /\bbooster box\b/i,
+  /\bvalue box\b/i,
+  /\bfat pack\b/i,
+  /\bvalue pack\b/i,
+  /\bretail pack\b/i,
+  /\bhobby pack\b/i,
+  /\bjumbo pack\b/i,
+  /\bcello pack\b/i,
+  /\bbooster pack\b/i,
+  /\bbox break\b/i,
+];
 
 export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   const scan = await getScanById(scanId);
@@ -1430,6 +1447,7 @@ function rankScpCandidatesLocally(
   const sourceTitle = `${listing.title} ${details?.subtitle ?? ''}`.trim();
   const fingerprint = normalizeTitleFingerprint(sourceTitle);
   return [...candidates]
+    .filter((candidate) => !looksLikeNonCardScpCandidate(candidate.productName))
     .map((candidate) => {
       const reviewMemory = scoreScpCandidateAgainstReviewMemory(
         { ebayTitle: sourceTitle, candidateProductId: candidate.productId, candidateProductName: candidate.productName },
@@ -1456,6 +1474,8 @@ function scoreCandidate(
 ): number {
   const haystack = `${candidate.productName} ${candidate.consoleName ?? ''}`.toLowerCase();
   let score = 0;
+
+  if (looksLikeNonCardScpCandidate(candidate.productName)) return -120;
 
   for (const token of tokenizeLoose(fingerprint)) {
     if (token.length > 2 && haystack.includes(token)) score += token.startsWith('#') ? 12 : 3;
@@ -1484,9 +1504,25 @@ function scoreCandidate(
   }
 
   if (listing.condition?.toLowerCase().includes('graded') && /psa|bgs|sgc|graded/i.test(candidate.productName)) score += 3;
+
+  const listingText = `${listing.title} ${details?.subtitle ?? ''}`.trim();
+  if (!listingContainsCandidatePlayer(listingText, candidate.productName)) score -= 40;
+
+  const candidateFingerprint = buildScpCandidateFingerprint(candidate);
+  const listingFingerprint = buildListingFingerprint(listing, { details });
+  const comparison = compareFingerprintMatch(listingFingerprint, candidateFingerprint);
+  const hardMismatches = comparison.negativeSignals.filter((signal) => /Player mismatch|Card # mismatch|Set family mismatch|Print-run mismatch/i.test(signal)).length;
+  score -= hardMismatches * 12;
+
   score += reviewMemoryScore;
   score += cardNumberMemoryScore;
   return score;
+}
+
+function looksLikeNonCardScpCandidate(productName: string | null | undefined): boolean {
+  const value = compactWhitespace(productName ?? '');
+  if (!value) return true;
+  return SCP_NON_CARD_PATTERNS.some((pattern) => pattern.test(value));
 }
 
 function inferConsoleCandidatesFromListing(listing: EbayListing, details: EbayListingDetails | null, filters?: SearchForm): string[] {

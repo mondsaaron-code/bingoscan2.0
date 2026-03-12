@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useMemo, useState } from 'react';
-import type { Disposition, ReviewOption, ScanResultRow } from '@/types/app';
+import { DISPOSITION_OPTIONS, type Disposition, type ReviewOption, type ScanResultRow } from '@/types/app';
 import { determineGradingLane, formatConfidencePct, formatRelativeTime, scoreDealOpportunity, summarizeDealReasons, toCurrency, toPct } from '@/lib/utils';
 
 export function ResultsTable({
@@ -61,11 +61,11 @@ export function ResultsTable({
     <div className="card card-pad stack">
       <div className="spread">
         <h2 className="section-title">{title}</h2>
-        <div className="row-actions">
+        <div className="row-actions" style={{ flexWrap: 'wrap' }}>
           <button className="btn btn-ghost" onClick={() => setSelectedIds(rows.map((row) => row.id))}>Select All</button>
-          <button className="btn" onClick={() => handleBulk('purchased')}>Purchased</button>
-          <button className="btn" onClick={() => handleBulk('suppress_90_days')}>Suppress 90 Days</button>
-          <button className="btn btn-danger" onClick={() => handleBulk('bad_logic')}>Bad Logic</button>
+          {DISPOSITION_OPTIONS.slice(0, 6).map((option) => (
+            <button key={option.value} className={option.tone === 'danger' ? 'btn btn-danger' : 'btn'} onClick={() => handleBulk(option.value)}>{option.label}</button>
+          ))}
         </div>
       </div>
       <div className="table-wrap">
@@ -148,10 +148,10 @@ export function ResultsTable({
                     </td>
                     <td>{toPct(row.estimatedMarginPct)}</td>
                     <td>
-                      <div className="row-actions">
-                        <button className="btn" onClick={() => onDisposition([row.id], 'purchased')}>Purchased</button>
-                        <button className="btn" onClick={() => onDisposition([row.id], 'suppress_90_days')}>Suppress</button>
-                        <button className="btn btn-danger" onClick={() => onDisposition([row.id], 'bad_logic')}>Bad Logic</button>
+                      <div className="row-actions" style={{ flexWrap: 'wrap' }}>
+                        {DISPOSITION_OPTIONS.map((option) => (
+                          <button key={option.value} className={option.tone === 'danger' ? 'btn btn-danger' : 'btn'} onClick={() => onDisposition([row.id], option.value)}>{option.label}</button>
+                        ))}
                       </div>
                     </td>
                   </tr>

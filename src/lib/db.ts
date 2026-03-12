@@ -469,7 +469,7 @@ export async function resolveReview(resultId: string, optionId: string): Promise
     ? (estimatedProfit / totalPurchasePrice) * 100
     : null;
   const profitable = passesThresholdsForFilters(filters, estimatedProfit, estimatedMarginPct);
-  const disposition = profitable ? null : 'not_profitable';
+  const disposition: Disposition | null = profitable ? null : 'not_enough_profit';
   const aiTopThreeProductIds = safeJsonParse<string[]>(resultRow?.ai_top_three_product_ids, []).map(String).slice(0, 3);
   const aiChosenProductId = resultRow?.ai_chosen_product_id ? String(resultRow.ai_chosen_product_id) : null;
   const selectedProductId = String(option.scp_product_id);
@@ -777,8 +777,8 @@ export async function getSellerOutcomeMemory(sellerUsername: string, limit = 120
   for (const row of rows) {
     const disposition = row.disposition as Disposition;
     if (disposition === 'purchased') purchased += 1;
-    else if (disposition === 'suppress_90_days') suppress += 1;
-    else if (disposition === 'bad_logic') badLogic += 1;
+    else if (disposition === 'suppress_90_days' || disposition === 'not_profitable' || disposition === 'not_enough_profit' || disposition === 'price_changed' || disposition === 'already_reviewed_duplicate') suppress += 1;
+    else if (disposition === 'bad_logic' || disposition === 'bad_scp_options' || disposition === 'does_not_match_query' || disposition === 'multi_card_or_set_builder' || disposition === 'wrong_player_or_wrong_card' || disposition === 'parallel_or_variant_unclear' || disposition === 'non_card_or_memorabilia') badLogic += 1;
   }
 
   return summarizeSellerOutcomeMemory({

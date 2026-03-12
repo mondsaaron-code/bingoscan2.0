@@ -600,16 +600,16 @@ const TITLE_MEMORY_STOP_WORDS = new Set([
   'rookie', 'rc', 'auto', 'autograph', 'signed', 'patch', 'relic', 'jersey', 'raw', 'graded', 'psa', 'bgs', 'sgc', 'cgc',
 ]);
 
-function getNegativeDispositionWeight(disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable', weights: { purchased: number; suppress: number; badLogic: number; notProfitable?: number }): number {
+function getNegativeDispositionWeight(disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable' | 'not_enough_profit' | 'bad_scp_options' | 'does_not_match_query' | 'multi_card_or_set_builder' | 'wrong_player_or_wrong_card' | 'parallel_or_variant_unclear' | 'price_changed' | 'already_reviewed_duplicate' | 'non_card_or_memorabilia', weights: { purchased: number; suppress: number; badLogic: number; notProfitable?: number }): number {
   if (disposition === 'purchased') return weights.purchased;
-  if (disposition === 'bad_logic') return weights.badLogic;
-  if (disposition === 'not_profitable') return weights.notProfitable ?? weights.suppress;
+  if (disposition === 'bad_logic' || disposition === 'bad_scp_options' || disposition === 'does_not_match_query' || disposition === 'multi_card_or_set_builder' || disposition === 'wrong_player_or_wrong_card' || disposition === 'parallel_or_variant_unclear' || disposition === 'non_card_or_memorabilia') return weights.badLogic;
+  if (disposition === 'not_profitable' || disposition === 'not_enough_profit' || disposition === 'price_changed' || disposition === 'already_reviewed_duplicate') return weights.notProfitable ?? weights.suppress;
   return weights.suppress;
 }
 
 export type TitleOutcomeMemoryRow = {
   ebayTitle: string;
-  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable' | 'not_enough_profit' | 'bad_scp_options' | 'does_not_match_query' | 'multi_card_or_set_builder' | 'wrong_player_or_wrong_card' | 'parallel_or_variant_unclear' | 'price_changed' | 'already_reviewed_duplicate' | 'non_card_or_memorabilia';
 };
 
 export type TitleOutcomeMemory = {
@@ -620,7 +620,7 @@ export type TitleOutcomeMemory = {
 export type FamilyOutcomeMemoryRow = {
   ebayTitle: string;
   scpProductName?: string | null;
-  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable' | 'not_enough_profit' | 'bad_scp_options' | 'does_not_match_query' | 'multi_card_or_set_builder' | 'wrong_player_or_wrong_card' | 'parallel_or_variant_unclear' | 'price_changed' | 'already_reviewed_duplicate' | 'non_card_or_memorabilia';
 };
 
 export type FamilyOutcomeMemory = {
@@ -648,7 +648,7 @@ export type AuctionOutcomeMemoryRow = {
   scpProductName?: string | null;
   auctionEndsAt?: string | null;
   totalPurchasePrice: number;
-  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable' | 'not_enough_profit' | 'bad_scp_options' | 'does_not_match_query' | 'multi_card_or_set_builder' | 'wrong_player_or_wrong_card' | 'parallel_or_variant_unclear' | 'price_changed' | 'already_reviewed_duplicate' | 'non_card_or_memorabilia';
 };
 
 export type AuctionOutcomeMemory = {
@@ -662,7 +662,7 @@ export type PriceBandOutcomeMemoryRow = {
   totalPurchasePrice: number;
   estimatedProfit?: number | null;
   estimatedMarginPct?: number | null;
-  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable' | 'not_enough_profit' | 'bad_scp_options' | 'does_not_match_query' | 'multi_card_or_set_builder' | 'wrong_player_or_wrong_card' | 'parallel_or_variant_unclear' | 'price_changed' | 'already_reviewed_duplicate' | 'non_card_or_memorabilia';
 };
 
 export type PriceBandOutcomeMemory = {
@@ -1030,7 +1030,7 @@ const PLAYER_MEMORY_STOP_WORDS = new Set([
 export type PlayerOutcomeMemoryRow = {
   ebayTitle: string;
   scpProductName?: string | null;
-  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable' | 'not_enough_profit' | 'bad_scp_options' | 'does_not_match_query' | 'multi_card_or_set_builder' | 'wrong_player_or_wrong_card' | 'parallel_or_variant_unclear' | 'price_changed' | 'already_reviewed_duplicate' | 'non_card_or_memorabilia';
 };
 
 export type PlayerOutcomeMemory = {
@@ -1093,7 +1093,7 @@ export function scoreListingAgainstPlayerMemory(
 export type CardNumberOutcomeMemoryRow = {
   ebayTitle: string;
   scpProductName?: string | null;
-  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable';
+  disposition: 'purchased' | 'suppress_90_days' | 'bad_logic' | 'not_profitable' | 'not_enough_profit' | 'bad_scp_options' | 'does_not_match_query' | 'multi_card_or_set_builder' | 'wrong_player_or_wrong_card' | 'parallel_or_variant_unclear' | 'price_changed' | 'already_reviewed_duplicate' | 'non_card_or_memorabilia';
 };
 
 export type CardNumberOutcomeMemory = {

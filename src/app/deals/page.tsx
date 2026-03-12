@@ -64,6 +64,7 @@ export default function DealsPage() {
   const [busy, setBusy] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
   const [checkingCaches, setCheckingCaches] = useState(false);
+  const [hiddenResultIds, setHiddenResultIds] = useState<string[]>([]);
   const intervalRef = useRef<number | null>(null);
 
   const loadDashboard = useCallback(async () => {
@@ -161,6 +162,10 @@ export default function DealsPage() {
     }
   }
 
+  function hideResultIds(ids: string[]) {
+    setHiddenResultIds((current) => [...new Set([...current, ...ids])]);
+  }
+
   async function setDisposition(ids: string[], disposition: Disposition) {
     setBanner(null);
     try {
@@ -171,7 +176,8 @@ export default function DealsPage() {
       });
       const body = (await response.json()) as { error?: string };
       if (!response.ok) throw new Error(body.error ?? 'Unable to update disposition');
-      await loadDashboard();
+      hideResultIds(ids);
+      void loadDashboard();
       setBanner(`Updated ${ids.length} listing${ids.length === 1 ? '' : 's'} to ${disposition.replace(/_/g, ' ')}.`);
     } catch (error) {
       setBanner(error instanceof Error ? error.message : 'Unable to update disposition');
@@ -188,7 +194,8 @@ export default function DealsPage() {
       });
       const body = (await response.json()) as { error?: string; disposition?: Disposition | null; matchedProductName?: string | null; tracked?: boolean; selectedIsAiTop1?: boolean; selectedInAiTop3?: boolean; selectedRank?: number | null };
       if (!response.ok) throw new Error(body.error ?? 'Unable to resolve review');
-      await loadDashboard();
+      if (body.disposition) hideResultIds([resultId]);
+      void loadDashboard();
       const suffix = body.disposition === 'not_profitable'
         ? ' It was tracked as not profitable and removed from Deals / Needs Review.'
         : body.tracked
@@ -221,6 +228,9 @@ export default function DealsPage() {
     }
   }
 
+  const visibleResults = dashboard.visibleResults.filter((row) => !hiddenResultIds.includes(row.id));
+  const needsReviewResults = dashboard.needsReviewResults.filter((row) => !hiddenResultIds.includes(row.id));
+
   const scanContext = dashboard.activeScan ?? dashboard.latestScan;
 
   const kpis = useMemo(() => {
@@ -230,11 +240,11 @@ export default function DealsPage() {
       { label: 'SCP Calls Today', value: dashboard.usage.scpCallsToday },
       { label: 'OpenAI Calls Today', value: dashboard.usage.openAiCallsToday },
       { label: 'Ximilar Calls Today', value: dashboard.usage.ximilarCallsToday },
-      { label: 'Deals Shown', value: dashboard.visibleResults.length },
-      { label: 'Needs Review', value: dashboard.needsReviewResults.length },
+      { label: 'Deals Shown', value: visibleResults.length },
+      { label: 'Needs Review', value: needsReviewResults.length },
       { label: 'Candidates Evaluated', value: scanContext?.metrics.candidatesEvaluated ?? 0 },
     ];
-  }, [dashboard, scanContext]);
+  }, [dashboard, scanContext, visibleResults.length, needsReviewResults.length]);
 
   const progress = useMemo(() => {
     const currentResults = (scanContext?.metrics.dealsFound ?? 0) + (scanContext?.metrics.needsReview ?? 0);

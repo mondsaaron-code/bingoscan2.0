@@ -44,6 +44,9 @@ const MULTI_CARD_PATTERNS = [
   /\bpick one\b/i,
   /\bfrom list\b/i,
   /\bset builder\b/i,
+  /\bpick your own\b/i,
+  /\bchoose your own\b/i,
+  /\bset numbers?\s*[-:]?\s*\d+/i,
   /\b[A-Za-z][A-Za-z'.-]+\s*\/\s*[A-Za-z][A-Za-z'.-]+\b/i,
   /(?:\b\d{1,4}\s*\/\s*\d{1,4}\b.*){2,}/i,
 ];
@@ -117,6 +120,9 @@ function rejectFromText(text: string, filters: SearchForm): string | null {
   if (STICKER_NON_CARD_PATTERN.test(text)) {
     return 'Blocked phrase: sticker';
   }
+
+  const numberedQueryReason = rejectNumberedOutOfMismatch(text, filters);
+  if (numberedQueryReason) return numberedQueryReason;
 
   if (filters.sport.trim().toLowerCase() === 'football' && /\bsoccer\b|\bfutbol\b|\buefa\b|\bfifa\b|\bpremier league\b/i.test(text)) {
     return 'Blocked soccer-style football listing';
@@ -298,7 +304,7 @@ export function buildEbayQueryTerms(filters: SearchForm): string[] {
   if (filters.rookie) terms.push('rookie');
   if (filters.autographed) terms.push('autograph');
   if (filters.memorabilia) terms.push('patch');
-  if (filters.numberedCard) terms.push('numbered');
+  if (filters.numberedCard && !filters.numberedOutOf) terms.push('numbered');
   return terms.filter(Boolean).map((value) => compactWhitespace(value)).filter(Boolean);
 }
 
@@ -341,4 +347,39 @@ export function buildNegativeClauses(filters: SearchForm): string[] {
   }
 
   return negatives;
+}
+
+
+function extractNumberedDenominator(text: string): number | null {
+  const normalized = compactWhitespace(text.toLowerCase());
+  if (!normalized) return null;
+
+  const slash = normalized.match(/(?:^|[^a-z0-9])(\d{1,3})\s*\/\s*(\d{1,4})(?:\b|[^a-z0-9])/i);
+  if (slash) return Number(slash[2]);
+
+  const bare = normalized.match(/\/\s*(\d{1,4})\b/);
+  if (bare) return Number(bare[1]);
+
+  const outOf = normalized.match(/(?:out of|of|numbered to|print run of)\s*(\d{1,4})\b/);
+  if (outOf) return Number(outOf[1]);
+
+  return null;
+}
+
+function rejectNumberedOutOfMismatch(text: string, filters: SearchForm): string | null {
+  const requested = Number(String(filters.numberedOutOf ?? '').trim());
+  if (!requested || !Number.isFinite(requested)) return null;
+
+  const denominator = extractNumberedDenominator(text);
+  if (denominator === requested) return null;
+  if (denominator !== null && denominator !== requested) {
+    return `Does not match numbered /${requested} query`;
+  }
+
+  const lowered = text.toLowerCase();
+  if (/\bnumbers?\b|\b49ers\b|\bforty niners\b/.test(lowered)) {
+    return `Does not match numbered /${requested} query`;
+  }
+
+  return `Does not match numbered /${requested} query`;
 }

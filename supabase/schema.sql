@@ -80,7 +80,7 @@ create table if not exists public.scan_results (
   listing_quality_score numeric(6,2),
   reasoning text,
   review_reason text,
-  disposition text check (disposition in ('purchased','suppress_90_days','bad_logic','not_profitable')),
+  disposition text check (disposition in ('purchased','suppress_90_days','bad_logic','not_profitable','not_enough_profit','bad_scp_options','does_not_match_query','multi_card_or_set_builder','wrong_player_or_wrong_card','parallel_or_variant_unclear','price_changed','already_reviewed_duplicate','non_card_or_memorabilia')),
   created_at timestamptz not null default now()
 );
 
@@ -106,7 +106,7 @@ create table if not exists public.scan_review_options (
 create table if not exists public.result_dispositions (
   id uuid primary key default gen_random_uuid(),
   scan_result_id uuid not null references public.scan_results(id) on delete cascade,
-  disposition text not null check (disposition in ('purchased','suppress_90_days','bad_logic','not_profitable')),
+  disposition text not null check (disposition in ('purchased','suppress_90_days','bad_logic','not_profitable','not_enough_profit','bad_scp_options','does_not_match_query','multi_card_or_set_builder','wrong_player_or_wrong_card','parallel_or_variant_unclear','price_changed','already_reviewed_duplicate','non_card_or_memorabilia')),
   created_at timestamptz not null default now()
 );
 
