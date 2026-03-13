@@ -557,6 +557,21 @@ export async function getScanResultMemory(scanId: string): Promise<Array<{ ebayT
   }));
 }
 
+
+export async function getSeenCandidateItemIds(scanId: string): Promise<string[]> {
+  const { data, error } = await getSupabase()
+    .from('scan_candidates')
+    .select('ebay_item_id')
+    .eq('scan_id', scanId)
+    .not('ebay_item_id', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(500);
+  if (error) throw error;
+  return Array.from(new Set(((data ?? []) as Array<Record<string, unknown>>)
+    .map((row) => row.ebay_item_id ? String(row.ebay_item_id) : null)
+    .filter((value): value is string => Boolean(value))));
+}
+
 export async function getNeedsReviewQueueFloor(scanId: string, limit = 20): Promise<{ count: number; floorProfit: number | null }> {
   const { data, error } = await getSupabase()
     .from('scan_results')

@@ -18,6 +18,7 @@ import {
   getEbaySearchPageCount,
   getNeedsReviewQueueFloor,
   getScanResultMemory,
+  getSeenCandidateItemIds,
   getScpCacheCsvTextByStoragePath,
   getSellerOutcomeMemory,
   incrementUsage,
@@ -90,6 +91,10 @@ const MAX_EXACT_FAMILY_RESULTS = 1;
 const MAX_CLUSTER_RESULTS = 2;
 const LOW_YIELD_STOP_MIN_RESULTS = 6;
 const LOW_YIELD_STREAK_TO_STOP = 3;
+const DUPLICATE_ONLY_PAGE_STREAK_TO_STOP = 2;
+const REPEATED_SIGNATURE_STREAK_TO_STOP = 2;
+const TINY_POOL_UNIQUE_THRESHOLD = 3;
+const TINY_POOL_PAGE_THRESHOLD = 3;
 
 let badLogicCache: { loadedAt: number; rows: Array<{ ebayTitle: string; fingerprint: string; createdAt: string; reasoning: string | null }> } | null = null;
 let titleOutcomeMemoryCache: { loadedAt: number; memory: ReturnType<typeof buildTitleOutcomeMemory> } | null = null;
@@ -106,6 +111,12 @@ type RankedCandidateRow = {
   score: number;
   reviewMemory: ReturnType<typeof scoreScpCandidateAgainstReviewMemory>;
   cardNumberMemory: ReturnType<typeof scoreScpCandidateAgainstCardNumberMemory>;
+};
+
+type ScanPoolContext = {
+  tinyPoolMode: boolean;
+  uniqueSeenAfterFetch: number;
+  pageNumber: number;
 };
 
 const SCP_NON_CARD_PATTERNS = [
@@ -173,10 +184,41 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
   const listings = searchOutcome.value;
   await incrementUsage('ebay', 1);
   await appendMetrics(scanId, { ebayCalls: 1, candidatesFetched: listings.length });
-  await addScanEvent(scanId, 'info', 'fetching_ebay', `Fetched ${listings.length} eBay candidates`, `Offset ${offset} (page ${searchPageCount + 1})`);
 
   if (listings.length === 0) {
+    await addScanEvent(scanId, 'info', 'fetching_ebay', 'Fetched 0 eBay candidates', `Offset ${offset} (page ${searchPageCount + 1})`);
     await markScanStatus(scanId, 'completed', 'No more eBay listings returned');
+    return (await getScanById(scanId))!;
+  }
+
+  const seenCandidateItemIds = new Set(await getSeenCandidateItemIds(scanId));
+  const batchSignature = buildListingBatchSignature(listings);
+  const uniqueItemIds = Array.from(new Set(listings.map((listing) => listing.itemId)));
+  const newUniqueItemIds = uniqueItemIds.filter((itemId) => !seenCandidateItemIds.has(itemId));
+  const uniqueSeenAfterFetch = seenCandidateItemIds.size + newUniqueItemIds.length;
+  await addScanEvent(
+    scanId,
+    'info',
+    'fetching_ebay',
+    `Fetched ${listings.length} eBay candidates`,
+    `Offset ${offset} (page ${searchPageCount + 1})\nUnique item ids: ${uniqueItemIds.length}\nNew unique in scan: ${newUniqueItemIds.length}\nSignature: ${batchSignature}`
+  );
+
+  const earlyFetchEvents = await getRecentStageEvents(scanId, 12);
+  const duplicateOnlyStreak = countConsecutiveDuplicateOnlyFetches(earlyFetchEvents);
+  const repeatedSignatureStreak = countConsecutiveMatchingFetchSignatures(earlyFetchEvents, batchSignature);
+  if (repeatedSignatureStreak >= REPEATED_SIGNATURE_STREAK_TO_STOP || duplicateOnlyStreak >= DUPLICATE_ONLY_PAGE_STREAK_TO_STOP) {
+    const stopReason = uniqueSeenAfterFetch <= TINY_POOL_UNIQUE_THRESHOLD
+      ? 'Stopped early because the query returned too few unique eBay listings to produce useful results'
+      : 'Stopped early because eBay pagination repeated the same listing batch';
+    await addScanEvent(
+      scanId,
+      'warning',
+      'worker_summary',
+      stopReason,
+      `Page ${searchPageCount + 1} • unique seen ${uniqueSeenAfterFetch} • repeated signature streak ${repeatedSignatureStreak} • duplicate-only fetch streak ${duplicateOnlyStreak}`
+    );
+    await markScanStatus(scanId, 'completed', stopReason);
     return (await getScanById(scanId))!;
   }
 
@@ -211,6 +253,21 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
 
   const tickResultsBefore = currentResults;
   const tickEvaluatedBefore = scan.metrics.candidatesEvaluated;
+  const scanPoolContext: ScanPoolContext = {
+    tinyPoolMode: uniqueSeenAfterFetch <= Math.max(TINY_POOL_UNIQUE_THRESHOLD, tickBudgetTightnessProbe(currentResults)),
+    uniqueSeenAfterFetch,
+    pageNumber: searchPageCount + 1,
+  };
+  if (scanPoolContext.tinyPoolMode && scanPoolContext.pageNumber >= TINY_POOL_PAGE_THRESHOLD) {
+    await addScanEvent(
+      scanId,
+      'warning',
+      'fetching_ebay',
+      'Tiny eBay candidate pool detected',
+      `Only ${scanPoolContext.uniqueSeenAfterFetch} unique listing(s) seen after page ${scanPoolContext.pageNumber}. Consider broadening one filter if this scan keeps starving.`
+    );
+  }
+
   let processed = 0;
   const tickBudget = getTickBudget(currentResults, scan.metrics.dealsFound);
   for (const { listing, score } of prioritizedListings) {
@@ -227,12 +284,13 @@ export async function runScanWorkerTick(scanId: string): Promise<ScanSummary> {
 Priority ${score}`);
       continue;
     }
-    const dedupeAllowed = await upsertDedupeItem(listing.itemId);
-    if (!dedupeAllowed) {
+    if (seenCandidateItemIds.has(listing.itemId)) {
       await appendMetrics(scanId, { candidatesFilteredOut: 1 });
       await addScanEvent(scanId, 'info', 'filtering', `Skipped duplicate eBay item ${listing.itemId}`);
       continue;
     }
+
+    await upsertDedupeItem(listing.itemId).catch(() => true);
 
     const rejectionReason = shouldRejectTitle(listing.title, scan.filters);
     const titleMemorySignal = scoreListingAgainstTitleMemory(listing.title, titleOutcomeMemory);
@@ -247,6 +305,7 @@ Priority ${score}`);
       auction_ends_at: listing.auctionEndsAt,
       stage: 'fetched',
     });
+    seenCandidateItemIds.add(listing.itemId);
 
     if (rejectionReason) {
       await updateCandidate(candidateId, { stage: 'filtered_out', rejection_reason: rejectionReason });
@@ -266,7 +325,7 @@ Priority ${score}`);
     }
 
     try {
-      await evaluateListing(scanId, candidateId, listing, scan.filters, titleOutcomeMemory, familyOutcomeMemory, playerOutcomeMemory, reviewResolutionMemory, auctionOutcomeMemory, priceBandOutcomeMemory, cardNumberOutcomeMemory);
+      await evaluateListing(scanId, candidateId, listing, scan.filters, titleOutcomeMemory, familyOutcomeMemory, playerOutcomeMemory, reviewResolutionMemory, auctionOutcomeMemory, priceBandOutcomeMemory, cardNumberOutcomeMemory, scanPoolContext);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown candidate evaluation error';
       await updateCandidate(candidateId, { stage: 'error', rejection_reason: message });
@@ -320,6 +379,7 @@ async function evaluateListing(
   auctionOutcomeMemory: ReturnType<typeof buildAuctionOutcomeMemory>,
   priceBandOutcomeMemory: ReturnType<typeof buildPriceBandOutcomeMemory>,
   cardNumberOutcomeMemory: ReturnType<typeof buildCardNumberOutcomeMemory>,
+  scanPoolContext: ScanPoolContext,
 ): Promise<void> {
   await markScanStatus(scanId, 'matching_scp', 'Inspecting listing and matching SportsCardsPro candidates');
   await updateCandidate(candidateId, { stage: 'matching_scp' });
@@ -373,7 +433,7 @@ async function evaluateListing(
     listing_quality_score: trustAdjustedScore,
   });
 
-  if (auctionMemorySignal.score <= -9 && priceBandMemorySignal.score <= -8 && trustAdjustedScore < 60) {
+  if (!scanPoolContext.tinyPoolMode && auctionMemorySignal.score <= -9 && priceBandMemorySignal.score <= -8 && trustAdjustedScore < 60) {
     const patternReason = `Suppressed by auction/price-band memory: ${auctionMemorySignal.reason ?? 'weak auction pattern'}${priceBandMemorySignal.reason ? ` + ${priceBandMemorySignal.reason}` : ''}`;
     await updateCandidate(candidateId, { stage: 'filtered_out', rejection_reason: patternReason });
     await appendMetrics(scanId, { candidatesFilteredOut: 1 });
@@ -382,7 +442,7 @@ ${auctionMemorySignal.band} • ${priceBandMemorySignal.band}`);
     return;
   }
 
-  if (familyMemorySignal.score <= -12 && titleMemorySignal.score <= 0 && trustAdjustedScore < 58) {
+  if (!scanPoolContext.tinyPoolMode && familyMemorySignal.score <= -12 && titleMemorySignal.score <= 0 && trustAdjustedScore < 58) {
     const familyReason = `Suppressed by set/parallel family memory: ${familyMemorySignal.reason ?? 'historically weak family'}`;
     await updateCandidate(candidateId, { stage: 'filtered_out', rejection_reason: familyReason });
     await appendMetrics(scanId, { candidatesFilteredOut: 1 });
@@ -390,7 +450,7 @@ ${auctionMemorySignal.band} • ${priceBandMemorySignal.band}`);
     return;
   }
 
-  if (sellerOutcome?.total && sellerOutcome.total >= 3 && sellerOutcome.purchased === 0 && (sellerOutcome.badLogic >= 2 || sellerOutcome.score <= -8)) {
+  if (!scanPoolContext.tinyPoolMode && sellerOutcome?.total && sellerOutcome.total >= 3 && sellerOutcome.purchased === 0 && (sellerOutcome.badLogic >= 2 || sellerOutcome.score <= -8)) {
     const sellerReason = `Suppressed by seller memory: ${sellerOutcome.label}`;
     await updateCandidate(candidateId, { stage: 'filtered_out', rejection_reason: sellerReason });
     await appendMetrics(scanId, { candidatesFilteredOut: 1 });
@@ -1909,6 +1969,53 @@ function extractCardNumberToken(value: string): string | null {
     if (/\d/.test(normalized)) return normalized.toLowerCase();
   }
   return null;
+}
+
+
+
+function buildListingBatchSignature(listings: EbayListing[]): string {
+  return Array.from(new Set(listings.map((listing) => listing.itemId))).sort().join('|');
+}
+
+function parseFetchDetails(details: string | null): { signature: string | null; newUniqueInScan: number | null } {
+  if (!details) return { signature: null, newUniqueInScan: null };
+  const signature = details.match(/Signature:\s*(.+)$/m)?.[1]?.trim() ?? null;
+  const newUnique = details.match(/New unique in scan:\s*(\d+)/i)?.[1];
+  return {
+    signature,
+    newUniqueInScan: newUnique ? Number(newUnique) : null,
+  };
+}
+
+function countConsecutiveMatchingFetchSignatures(
+  events: Array<{ level: 'info' | 'warning' | 'error'; stage: string; message: string; details: string | null; createdAt: string }>,
+  signature: string,
+): number {
+  let streak = 0;
+  for (const event of events) {
+    if (event.stage !== 'fetching_ebay' || !event.message.startsWith('Fetched ')) continue;
+    const parsed = parseFetchDetails(event.details);
+    if (parsed.signature === signature) streak += 1;
+    else break;
+  }
+  return streak;
+}
+
+function countConsecutiveDuplicateOnlyFetches(
+  events: Array<{ level: 'info' | 'warning' | 'error'; stage: string; message: string; details: string | null; createdAt: string }>,
+): number {
+  let streak = 0;
+  for (const event of events) {
+    if (event.stage !== 'fetching_ebay' || !event.message.startsWith('Fetched ')) continue;
+    const parsed = parseFetchDetails(event.details);
+    if (parsed.newUniqueInScan === 0) streak += 1;
+    else break;
+  }
+  return streak;
+}
+
+function tickBudgetTightnessProbe(currentResults: number): number {
+  return currentResults > 0 ? 4 : 5;
 }
 
 

@@ -102,7 +102,7 @@ function rejectFromText(text: string, filters: SearchForm): string | null {
   const lower = text.toLowerCase();
 
   for (const word of BLOCK_WORDS) {
-    if (lower.includes(word)) {
+    if (matchesBlockedPhrase(text, word)) {
       return `Blocked phrase: ${word}`;
     }
   }
@@ -241,6 +241,17 @@ function rejectFromAspects(aspectMap: Record<string, string[]>, filters: SearchF
   }
 
   return null;
+}
+
+
+function matchesBlockedPhrase(text: string, phrase: string): boolean {
+  const escaped = phrase
+    .trim()
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\s+/g, '\\s+');
+  if (!escaped) return false;
+  const pattern = new RegExp(`(^|[^a-z0-9])${escaped}($|[^a-z0-9])`, 'i');
+  return pattern.test(text);
 }
 
 function shouldRejectApparel(text: string): boolean {
