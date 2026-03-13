@@ -177,7 +177,7 @@ export default function DealsPage() {
       const body = (await response.json()) as { error?: string };
       if (!response.ok) throw new Error(body.error ?? 'Unable to update disposition');
       hideResultIds(ids);
-      void loadDashboard();
+      await loadDashboard();
       setBanner(`Updated ${ids.length} listing${ids.length === 1 ? '' : 's'} to ${disposition.replace(/_/g, ' ')}.`);
     } catch (error) {
       setBanner(error instanceof Error ? error.message : 'Unable to update disposition');
@@ -195,8 +195,8 @@ export default function DealsPage() {
       const body = (await response.json()) as { error?: string; disposition?: Disposition | null; matchedProductName?: string | null; tracked?: boolean; selectedIsAiTop1?: boolean; selectedInAiTop3?: boolean; selectedRank?: number | null };
       if (!response.ok) throw new Error(body.error ?? 'Unable to resolve review');
       if (body.disposition) hideResultIds([resultId]);
-      void loadDashboard();
-      const suffix = body.disposition === 'not_profitable'
+      await loadDashboard();
+      const suffix = body.disposition === 'not_profitable' || body.disposition === 'not_enough_profit'
         ? ' It was tracked as not profitable and removed from Deals / Needs Review.'
         : body.tracked
           ? ' The manual match was saved for future learning.'
@@ -409,9 +409,9 @@ export default function DealsPage() {
         </div>
         <ScpCacheLibrary caches={dashboard.scpCaches} />
 
-        <ResultsTable title="Deals" rows={dashboard.visibleResults} reviewOptionsByResultId={dashboard.reviewOptionsByResultId} onDisposition={setDisposition} onResolveReview={resolveReview} />
+        <ResultsTable title="Deals" rows={visibleResults} reviewOptionsByResultId={dashboard.reviewOptionsByResultId} onDisposition={setDisposition} onResolveReview={resolveReview} />
         <NeedsReviewBoard
-          rows={dashboard.needsReviewResults}
+          rows={needsReviewResults}
           reviewOptionsByResultId={dashboard.reviewOptionsByResultId}
           onDisposition={setDisposition}
           onResolveReview={resolveReview}

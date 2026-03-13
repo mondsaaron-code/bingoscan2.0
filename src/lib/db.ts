@@ -432,9 +432,12 @@ export async function insertReviewOptions(resultId: string, options: Array<Recor
 export async function setDisposition(resultIds: string[], disposition: Disposition): Promise<void> {
   const { error } = await getSupabase().from('scan_results').update({ disposition }).in('id', resultIds);
   if (error) throw error;
+
   const rows = resultIds.map((id) => ({ scan_result_id: id, disposition }));
   const { error: dispositionError } = await getSupabase().from('result_dispositions').insert(rows);
-  if (dispositionError) throw dispositionError;
+  if (dispositionError) {
+    console.warn('Disposition history insert failed after scan_results update', dispositionError);
+  }
 }
 
 function passesThresholdsForFilters(filters: SearchForm, estimatedProfit: number | null, estimatedMarginPct: number | null): boolean {
